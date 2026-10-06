@@ -61,7 +61,7 @@ def cmd_separate(req):
     total = max(1, int(float(req["duration"]) * sr))
 
     dec = subprocess.Popen([req["ffmpeg"], "-v", "error", "-i", req["input"], "-vn", "-f", "f32le", "-ac", "2",
-                            "-ar", str(sr), "-"], stdout=subprocess.PIPE)
+                            "-ar", str(sr), "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     voc_out = sf.SoundFile(req["vocals"], "w", sr, 1, "PCM_16")
     bg_out = sf.SoundFile(req["background"], "w", sr, 2, "PCM_16")
 
@@ -89,9 +89,12 @@ def cmd_separate(req):
             break
         tail_v = v[chunk:]
         buf = np.concatenate([buf[chunk:], read(chunk)])
+    err = dec.stderr.read().decode("utf-8", "replace").strip()
     dec.wait()
     voc_out.close()
     bg_out.close()
+    if not done:  # nothing decoded: say why instead of leaving two silent files
+        raise RuntimeError("No sound could be read from the video" + (f": {err[-500:]}" if err else ""))
     return {"seconds": done / sr}
 
 

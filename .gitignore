@@ -8,3 +8,5 @@ py/
 __pycache__/
 .setup-done.json
 /branding/
+.cache/
+/tmp/

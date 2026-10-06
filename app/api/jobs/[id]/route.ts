@@ -1,5 +1,6 @@
 import { fs, path } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
+import { stemsReady } from "@/lib/clone";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +12,7 @@ export async function GET(_req: Request, { params }: Ctx) {
   if (!job) return Response.json({ detail: "Job not found" }, { status: 404 });
   const has = (f: string) => fs.existsSync(path.join(jobDir(job.id), f));
   return Response.json({ ...job, tracks: {
-    voice: has("voice_track.m4a"), vocals: has("vocals.wav") && has("background.wav"), output: has("output.mp4"),
+    voice: has("voice_track.m4a"), vocals: !!job.meta && stemsReady(jobDir(job.id), job.meta.duration), output: has("output.mp4"),
   } });
 }
 

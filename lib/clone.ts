@@ -35,18 +35,37 @@ async function worker<T>(cmd: string, jd: string, req: object, onProgress: (frac
 
 export const VOCALS = "vocals.wav", BACKGROUND = "background.wav", VOICES_DIR = "voices";
 
+const STEM_SR = 44100; // Demucs writes 16-bit WAV at this rate: voices mono, music & effects stereo
+
+/**
+ * Whether both tracks are there and complete. A track cut short (the app closed while separating, before files
+ * were written under a temporary name) or holding only a WAV header does not count: it is made again.
+ */
+export function stemsReady(jd: string, duration: number) {
+  const size = (f: string) => { try { return fs.statSync(path.join(jd, f)).size; } catch { return 0; } };
+  const want = (channels: number) => Math.max(4096, duration * STEM_SR * 2 * channels * 0.9);
+  return size(VOCALS) >= want(1) && size(BACKGROUND) >= want(2);
+}
+
 /** Voices and music/effects as separate tracks (for clean voice samples and a dub without the old voices). */
 export async function separate(jd: string, input: string, duration: number, onProgress: (f: number) => void) {
-  if (fs.existsSync(path.join(jd, VOCALS)) && fs.existsSync(path.join(jd, BACKGROUND))) return;
+  if (stemsReady(jd, duration)) return;
+  // written under temporary names and renamed only when complete, so an interrupted run never looks finished
+  const part = (f: string) => path.join(jd, f.replace(".wav", ".part.wav"));
   try {
     await worker("separate", jd, {
-      input, duration, ffmpeg: tool("ffmpeg"),
-      vocals: path.join(jd, VOCALS), background: path.join(jd, BACKGROUND),
+      input, duration, ffmpeg: tool("ffmpeg"), vocals: part(VOCALS), background: part(BACKGROUND),
     }, onProgress);
-  } catch (e) { // a half-written pair must not count as done
-    await fsp.rm(path.join(jd, VOCALS), { force: true });
-    await fsp.rm(path.join(jd, BACKGROUND), { force: true });
+    for (const f of [VOCALS, BACKGROUND]) {
+      await fsp.rm(path.join(jd, f), { force: true });
+      await fsp.rename(part(f), path.join(jd, f));
+    }
+    if (!stemsReady(jd, duration)) throw new Error("Separating voices from music gave too little sound - does the video have an audio track?");
+  } catch (e) {
+    for (const f of [VOCALS, BACKGROUND]) await fsp.rm(path.join(jd, f), { force: true });
     throw e;
+  } finally {
+    for (const f of [VOCALS, BACKGROUND]) await fsp.rm(part(f), { force: true });
   }
 }
 

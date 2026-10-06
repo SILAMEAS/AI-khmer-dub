@@ -17,8 +17,9 @@ export type Mix = {
   split: boolean; voices: number; khmerTone: Tone; origTone: Tone; parts: Part[];
 };
 export const FLAT: Tone = { pitch: 0, bass: 0, treble: 0, echo: "none" };
+/** By default the original voices are removed (separated from the music), the music and effects stay. */
 export const DEFAULT_MIX: Mix = {
-  music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0, split: false, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
+  music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0, split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
 };
 /** A mix saved earlier (or sent by the server), completed with defaults for settings added since. */
 export const fullMix = (m: Partial<Mix> | undefined): Mix => ({
@@ -34,6 +35,8 @@ export type Job = {
   };
   meta?: { title: string; duration: number; language: string; segments: number; speakers?: number };
   tracks?: { voice: boolean; vocals: boolean; output: boolean };
+  task?: { name: "separate"; progress: number; message: string }; // runs in the background, the editor stays usable
+  taskError?: string;
 };
 
 export const clock = (t: number, tenths = false) => {

@@ -1,5 +1,5 @@
 import { fs, path } from "./rt";
-import { dub, prepare, remix, render, type Meta, type Opts } from "./pipeline";
+import { dub, prepare, remix, render, separateVoices, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 
 export type Job = {
@@ -15,6 +15,9 @@ export type Job = {
   created: number;
   version?: number;
   exported?: number; // the version output.mp4 was made at; older than `version` when the voices changed since
+  // a background task that leaves the job as it is (the editor stays usable), e.g. separating voices from music
+  task?: { name: "separate"; progress: number; message: string };
+  taskError?: string;
   timings?: Record<string, number>; // seconds spent per stage
 };
 
@@ -29,6 +32,7 @@ function init(): Store {
     const f = path.join(JOBS_DIR, id, "job.json");
     if (!fs.existsSync(f)) continue;
     const job: Job = JSON.parse(fs.readFileSync(f, "utf8"));
+    job.task = undefined; // a background task does not survive a restart; it is started again when needed
     if (job.status === "queued" || job.status === "running") {
       Object.assign(job, { status: "error", error: "Server restarted while this job was running" });
     }
@@ -103,6 +107,12 @@ export function startJob(job: Job) {
   enqueue(() => runPrepare(job));
 }
 
+/** The first step failed (e.g. the PC ran out of memory): run it again; a downloaded video is used again. */
+export function retryPrepare(job: Job) {
+  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
+  startJob(job);
+}
+
 /**
  * Rebuild only the video picture (new subtitle style, logo or format); voices and audio stay as they are.
  * With `sound`, the Khmer lines already made are also mixed again (new sound levels).
@@ -121,6 +131,24 @@ export function startRender(job: Job, sound = false) {
       Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Exported", version, exported: version });
       save(job);
     } catch (e) { fail(job, e); }
+  });
+}
+
+/** Separate the original voices from the music, without touching the job's state (the editor keeps working). */
+export function startSeparate(job: Job) {
+  if (job.task) return;
+  Object.assign(job, { task: { name: "separate", progress: 0, message: "Waiting to separate voices from music" }, taskError: undefined });
+  save(job);
+  enqueue(async () => {
+    try {
+      await separateVoices(jobDir(job.id), job.meta!, (_stage, progress, message) => (job.task = { name: "separate", progress, message }));
+    } catch (e) {
+      console.error(e);
+      job.taskError = e instanceof Error ? e.message : String(e);
+    } finally {
+      job.task = undefined;
+      save(job);
+    }
   });
 }
 

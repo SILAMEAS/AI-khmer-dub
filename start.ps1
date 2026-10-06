@@ -12,6 +12,15 @@ function Update-PathFromSystem {
               [Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+# Everything this app writes stays inside its folder, not on the system drive: npm's download cache,
+# temporary files (npm, the build, the app), and a portable Node.js when the PC has none.
+$env:npm_config_cache = Join-Path $PSScriptRoot ".cache\npm"
+$tmp = Join-Path $PSScriptRoot "tmp"
+New-Item -ItemType Directory -Force $tmp | Out-Null
+$env:TEMP = $tmp; $env:TMP = $tmp
+$ownNode = Join-Path $PSScriptRoot "bin\node"
+if (Test-Path (Join-Path $ownNode "node.exe")) { $env:Path = "$ownNode;$env:Path" }
+
 # Already running (e.g. start.cmd double-clicked twice)? Just show it.
 try {
   Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5000/api/capabilities -TimeoutSec 2 | Out-Null
@@ -20,16 +29,24 @@ try {
   exit 0
 } catch { }
 
-# 1. Node.js
+# 1. Node.js: the one on the PC, or else a portable one downloaded into bin\node (nothing installed on C:)
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Stop-WithMessage "Node.js is needed. Install the LTS version from https://nodejs.org, then run start.cmd again."
-  }
-  Write-Host "Installing Node.js LTS (a Windows prompt may appear)..."
-  winget install -e --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements
-  Update-PathFromSystem
+  Write-Host "Downloading Node.js LTS into bin\node..."
+  try {
+    $ProgressPreference = "SilentlyContinue" # Windows PowerShell's progress bar makes downloads very slow
+    # (the parentheses matter: Windows PowerShell passes a downloaded JSON list on as one item otherwise)
+    $lts = ((Invoke-RestMethod https://nodejs.org/dist/index.json) | Where-Object { $_.lts } | Select-Object -First 1).version
+    $zip = Join-Path $tmp "node.zip"
+    Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$lts/node-$lts-win-x64.zip" -OutFile $zip
+    $unpacked = Join-Path $tmp "node-unpacked"
+    & "$env:SystemRoot\System32\tar.exe" -xf $zip -C (New-Item -ItemType Directory -Force $unpacked).FullName
+    New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "bin") | Out-Null
+    Move-Item (Get-ChildItem $unpacked -Directory | Select-Object -First 1).FullName $ownNode
+    Remove-Item -Recurse -Force $unpacked, $zip
+    $env:Path = "$ownNode;$env:Path"
+  } catch { }
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Stop-WithMessage "Node.js was installed. Close this window and run start.cmd again."
+    Stop-WithMessage "Node.js could not be downloaded. Check the internet connection, or install it from https://nodejs.org, then run start.cmd again."
   }
 }
 

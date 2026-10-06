@@ -39,7 +39,16 @@ const CARDS: Record<VoiceChoice, [string, string, string, string]> = {
   female: ["girl", "👧", "Girl", "Sreymom"],
 };
 const KM_LABEL: Record<VoiceChoice, string> = { clone: "សំឡេងដើម", auto: "ស្វ័យប្រវត្តិ", male: "ប្រុស", female: "ស្រី" };
-const PREFS = "khmerDubPrefs";
+const PREFS = "khmerDubPrefs", LAYOUT = "khmerDubLayout";
+
+/** Sizes of the resizable parts (pixels): left panel, right panel, timeline. */
+type Sizes = { left: number; right: number; bottom: number };
+const SIZES: Sizes = { left: 300, right: 320, bottom: 210 };
+const fitSizes = (s: Sizes): Sizes => ({
+  left: Math.round(Math.min(640, Math.max(200, s.left))),
+  right: Math.round(Math.min(640, Math.max(240, s.right))),
+  bottom: Math.round(Math.min(Math.max(140, (typeof window === "undefined" ? 900 : window.innerHeight) - 52 - 180), Math.max(110, s.bottom))),
+});
 
 function VoiceCard({ v, on, onPick, rate, off }: { v: VoiceChoice; on: boolean; onPick: () => void; rate: number; off?: string }) {
   const [cls, icon, name, sub] = CARDS[v];
@@ -85,7 +94,7 @@ export default function Studio() {
   const [err, setErr] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
-  // the settings being edited (live in the player); sent to the server on Update voices / Export
+  // the settings being edited (live in the player); voice changes are sent by themselves, the rest on Export
   const [voice, setVoice] = useState<VoiceChoice>("auto");
   const [match, setMatch] = useState(true);
   const [rate, setRate] = useState(0);
@@ -109,6 +118,37 @@ export default function Studio() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const stopAt = useRef<number | null>(null);
   const { brand, reload } = useBranding();
+
+  // the panels and the timeline can be resized by dragging their edges; the sizes are remembered
+  const [sizes, setSizes] = useState<Sizes>(SIZES);
+  const [dragging, setDragging] = useState<keyof Sizes | null>(null);
+  useEffect(() => {
+    try { const s = JSON.parse(localStorage.getItem(LAYOUT) || "null"); if (s) setSizes(fitSizes({ ...SIZES, ...s })); } catch {}
+  }, []);
+  const saveSizes = (s: Sizes) => { try { localStorage.setItem(LAYOUT, JSON.stringify(s)); } catch {} };
+  function resize(e: React.PointerEvent, which: keyof Sizes) {
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const x0 = e.clientX, y0 = e.clientY, start = sizes;
+    let now = start;
+    setDragging(which);
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - x0, dy = ev.clientY - y0;
+      now = fitSizes({ ...start, [which]: which === "left" ? start.left + dx : which === "right" ? start.right - dx : start.bottom - dy });
+      setSizes(now);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      setDragging(null); saveSizes(now);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+  const resetSize = (which: keyof Sizes) => { const s = { ...sizes, [which]: SIZES[which] }; setSizes(s); saveSizes(s); };
+  const handle = (which: keyof Sizes) => (
+    <div className={`rz rz-${which} ${dragging === which ? "on" : ""}`} onPointerDown={(e) => resize(e, which)}
+      onDoubleClick={() => resetSize(which)} title="Drag to resize · double-click to reset" />
+  );
 
   // ---------------------------------------------------------------- loading
   const loadHistory = useCallback(() => { api<Job[]>("/api/jobs").then(setHistory).catch(() => {}); }, []);
@@ -157,7 +197,7 @@ export default function Studio() {
         const j = await api<Job>(`/api/jobs/${jobId}`);
         if (stop) return;
         setJob(j);
-        if (j.status === "queued" || j.status === "running") timer = setTimeout(tick, 1200);
+        if (j.status === "queued" || j.status === "running" || j.task) timer = setTimeout(tick, 1200);
         else loadHistory();
       } catch { if (!stop) openJob(null); }
     };
@@ -168,11 +208,31 @@ export default function Studio() {
   // a job that is ready: its settings and lines come into the editor
   const ready = job && (job.status === "review" || job.status === "done");
   const jobVersion = `${job?.id}:${job?.version ?? 0}:${job?.status}`;
+  // The project's saved settings come into the editor once, when it is opened. After that the editor is what
+  // counts: a job finishing in the background (new voices, an export) never undoes what you changed meanwhile.
+  const [synced, setSynced] = useState(""); // id of the project whose settings are in the editor
+  useEffect(() => setSynced(""), [jobId]);
+  const sentSegs = useRef<Segment[] | null>(null); // the lines as last sent to be voiced
+  const baseRef = useRef<Segment[] | null>(null);
   useEffect(() => {
     if (!job || !ready) return;
-    setVoice(job.opts.voice); setMatch(job.opts.match !== false); setRate(job.opts.rate ?? 0); setBgMode(job.opts.bgMode);
-    setLook(fullLook(job.opts)); setMix(fullMix(job.opts.mix));
-    api<Segment[]>(`/api/jobs/${job.id}/segments`).then((s) => { setSegs(s); setBaseSegs(s); }).catch(() => {});
+    const first = synced !== job.id;
+    if (first) {
+      setVoice(job.opts.voice); setMatch(job.opts.match !== false); setRate(job.opts.rate ?? 0); setBgMode(job.opts.bgMode);
+      setLook(fullLook(job.opts)); setMix(fullMix(job.opts.mix));
+      setSynced(job.id);
+    }
+    api<Segment[]>(`/api/jobs/${job.id}/segments`).then((saved) => {
+      const before = sentSegs.current ?? baseRef.current;
+      baseRef.current = saved;
+      setBaseSegs(saved);
+      setSegs((local) => {
+        if (first || !local || !before || local.length !== saved.length) return saved;
+        // a line changed since it was sent keeps your change; the others take what was saved
+        const differs = (a: Segment, b: Segment) => a.km !== b.km || a.voice !== b.voice || a.speaker !== b.speaker;
+        return saved.map((x, i) => (differs(local[i], before[i]) ? { ...x, km: local[i].km, voice: local[i].voice, speaker: local[i].speaker } : x));
+      });
+    }).catch(() => {});
   }, [jobVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- what changed
@@ -188,11 +248,24 @@ export default function Studio() {
   const stemsWanted = (clone || mix.split) && bgMode === "duck";
   const voicesChanged = !!job && job.status === "done" && (edited.size > 0 || voice !== job.opts.voice
     || match !== (job.opts.match !== false) || rate !== (job.opts.rate ?? 0));
-  const needsPrep = !!job && job.status === "done" && stemsWanted && !job.tracks?.vocals;
   const settingsNow = JSON.stringify([look, mix, bgMode]);
   const settingsJob = job ? JSON.stringify([fullLook(job.opts), fullMix(job.opts.mix), job.opts.bgMode]) : "";
   const exportCurrent = !!job?.tracks?.output && job.exported === job.version && !voicesChanged && settingsNow === settingsJob;
   const working = job?.status === "queued" || job?.status === "running";
+
+  // removing the original voices needs them separated from the music: started by itself, in the background
+  const separating = useRef(new Set<string>());
+  const separateNow = useCallback(async (id: string) => {
+    separating.current.add(id);
+    try { await api(`/api/jobs/${id}/separate`, { method: "POST" }); } catch { /* shown through job.taskError */ }
+    setPollKey((k) => k + 1);
+  }, []);
+  useEffect(() => {
+    // only once the project's own settings are in the editor (not the defaults shown while it loads)
+    if (!job?.meta || !ready || synced !== job.id || !canClone || !stemsWanted || job.tracks?.vocals || job.task
+      || separating.current.has(job.id)) return;
+    separateNow(job.id);
+  }, [job?.id, job?.status, job?.task, job?.tracks?.vocals, stemsWanted, canClone, ready, synced, separateNow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- actions
   const settingsBody = () => ({ voice, match, rate, bgMode, mix, ...look });
@@ -222,22 +295,32 @@ export default function Studio() {
   }
 
   /** Make the Khmer voices (only lines that changed are made again) and the layers for the preview. */
-  async function makeVoices() {
+  async function makeVoices(auto = false) {
     if (!jobId) return;
-    videoRef.current?.pause();
+    if (!auto) videoRef.current?.pause(); // made by itself: the video keeps playing
     const body: Record<string, unknown> = settingsBody();
     if (segs) body.segments = segs.map((s, i) => ({ i, km: s.km, voice: s.voice, speaker: s.speaker }));
+    sentSegs.current = segs;
     try {
       await api(`/api/jobs/${jobId}/dub`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       setPollKey((k) => k + 1);
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { if (auto) setErr((e as Error).message); else alert((e as Error).message); }
   }
+
+  // A changed voice, speed or "sound like the speaker" is applied by itself; edited lines too, once you stop
+  // typing. Only what changed is made again, and the preview then plays the new voices.
+  const voiceSettingsChanged = !!job && (voice !== job.opts.voice || match !== (job.opts.match !== false) || rate !== (job.opts.rate ?? 0));
+  useEffect(() => {
+    if (!job || job.status !== "done" || synced !== job.id || !voicesChanged || pendingExport) return;
+    const t = setTimeout(() => makeVoices(true), voiceSettingsChanged ? 600 : 2000);
+    return () => clearTimeout(t);
+  }, [voice, match, rate, segs, job?.status, job?.version, synced]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Merge every layer into one video. Voices that changed are made first. */
   async function exportVideo() {
     if (!jobId) return;
     setTab("export");
-    if (voicesChanged || needsPrep) { setPendingExport(true); await makeVoices(); return; }
+    if (voicesChanged) { setPendingExport(true); await makeVoices(); return; }
     videoRef.current?.pause();
     try {
       await api(`/api/jobs/${jobId}/render`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -249,6 +332,12 @@ export default function Studio() {
     if (pendingExport && job?.status === "done" && !voicesChanged) { setPendingExport(false); exportVideo(); }
     if (pendingExport && job?.status === "error") setPendingExport(false);
   }, [job?.status, job?.version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The first step failed: run it again (a downloaded video is not downloaded twice). */
+  async function retryFirstStep() {
+    if (!jobId) return;
+    try { await api(`/api/jobs/${jobId}/retry`, { method: "POST" }); setPollKey((k) => k + 1); } catch (e) { alert((e as Error).message); }
+  }
 
   async function removeJob(id: string) {
     if (!confirm("Delete this project and all its files?")) return;
@@ -340,7 +429,7 @@ export default function Studio() {
             ))}
           </div>
         )}
-        <small className="note">The subtitle changes live. {job?.status === "done" ? "The voice for edited lines is made on “Update voices” (only those lines)." : ""} An empty line is not dubbed.</small>
+        <small className="note">The subtitle changes live. {job?.status === "done" ? "The voice for an edited line is made by itself 2 s after you stop typing (only that line)." : ""} An empty line is not dubbed.</small>
       </div>
     );
   })();
@@ -450,7 +539,9 @@ export default function Studio() {
       case "text": return <TitlePanel {...lookProps} />;
       case "filters": return <FilterGallery {...lookProps} />;
       case "effects": return <CoverPanel {...lookProps} />;
-      case "audio": return <SoundSources value={mix} onChange={setMix} bgMode={bgMode} onBgMode={setBgMode} canSplit={canClone} clone={clone} brand={brand} reload={reload} />;
+      case "audio": return <SoundSources value={mix} onChange={setMix} bgMode={bgMode} onBgMode={setBgMode} canSplit={canClone} clone={clone}
+        brand={brand} reload={reload} onRetry={() => job && separateNow(job.id)}
+        stems={{ project: !!job?.meta, ready: !!job?.tracks?.vocals, task: job?.task, error: job?.taskError }} />;
       case "logo": return <LogoPanel {...lookProps} brand={brand} reload={reload} part="left" />;
       case "export": return <FormatPanel {...lookProps} />;
     }
@@ -485,8 +576,8 @@ export default function Studio() {
       case "voice": return (
         <div className="pane">
           <h4>About the voice</h4>
-          <small className="note">The voice, speed and “sound like the speaker” are used when the voices are made. Edited lines and a changed voice are
-            made again with <b>Update voices</b> (only what changed). Sound levels and tone are on the 🎵 Audio tab and change live.</small>
+          <small className="note">Change the voice, speed or “sound like the speaker” and the new voice is made by itself in a moment – only
+            what changed – then the player uses it. No need to export. Sound levels and tone are on the 🎵 Audio tab and change live.</small>
         </div>
       );
       case "captions": case "text": return <SubtitleStylePanel {...lookProps} brand={brand} reload={reload} />;
@@ -517,13 +608,13 @@ export default function Studio() {
   let primary: React.ReactNode;
   if (!job) primary = <button type="button" className="btn" disabled={busy} onClick={start}>{uploadPct !== null ? `Uploading ${uploadPct}%` : "▶ Start dubbing"}</button>;
   else if (working) primary = <button type="button" className="btn" disabled>{Math.round(job.progress * 100)}% · {job.message.slice(0, 38)}</button>;
-  else if (job.status === "review") primary = <button type="button" className="btn" onClick={makeVoices}>🗣 Generate Khmer voice</button>;
-  else if (job.status === "error") primary = <button type="button" className="btn" onClick={job.meta ? makeVoices : () => openJob(null)}>{job.meta ? "Try again" : "New project"}</button>;
+  else if (job.status === "review") primary = <button type="button" className="btn" onClick={() => makeVoices()}>🗣 Generate Khmer voice</button>;
+  else if (job.status === "error") primary = <button type="button" className="btn" onClick={job.meta ? () => makeVoices() : retryFirstStep}>Try again</button>;
   else primary = (
     <>
-      {(voicesChanged || needsPrep) && (
-        <button type="button" className="btn ghost" onClick={makeVoices} title="Makes the voice again for edited lines only, then the preview plays them">
-          🗣 Update voices{edited.size ? ` (${edited.size})` : ""}</button>
+      {voicesChanged && (
+        <button type="button" className="btn ghost" onClick={() => makeVoices()} title="Voice changes are applied by themselves in a moment; this does it right now">
+          🗣 Applying voice…{edited.size ? ` (${edited.size})` : ""}</button>
       )}
       <button type="button" className="btn" onClick={exportVideo}>{exportCurrent ? "✓ Exported" : "⬆ Export"}</button>
     </>
@@ -546,7 +637,8 @@ export default function Studio() {
   );
 
   return (
-    <div className="studio">
+    <div className={`studio ${dragging ? `resizing ${dragging === "bottom" ? "rows" : "cols"}` : ""}`}
+      style={{ "--left-w": `${sizes.left}px`, "--right-w": `${sizes.right}px`, "--bottom-h": `${sizes.bottom}px` } as React.CSSProperties}>
       <header className="topbar">
         <div className="brand"><span className="logo km">ក</span> Khmer AI Dubber</div>
         <div className="project-name">{job ? job.meta?.title || job.title : file?.name || "New project"}
@@ -575,6 +667,8 @@ export default function Studio() {
         <div className="panel-title">{lineEditor && (tab === "captions" || tab === "voice" || tab === "media") ? "Line" : "Settings"}</div>
         {right}
       </aside>
+
+      {handle("left")}{handle("right")}{handle("bottom")}
 
       <footer className="bottom">
         <Timeline duration={duration || job?.meta?.duration || 0} time={time} onSeek={seek} segs={segs} edited={edited}

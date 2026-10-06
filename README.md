@@ -11,8 +11,8 @@ Upload a Chinese or English video (or paste a link) and get back:
 - ✂️ only **part of the video** if you like (cut from … to …)
 - 📱 in the **shape for each platform**: as the source, 16:9 YouTube, 9:16 TikTok / Reels / Shorts, 1:1 or 4:5 posts,
   at 1080p / 720p / 480p
-- 🔊 a **sound mix you control** (music level, Khmer voice level, your own background music), normalised to −14 LUFS
-  like YouTube and Facebook play
+- 🔊 a **sound mix you control**: the original voices removed (or kept quietly), music level, Khmer voice level and
+  sound, your own background music, other levels for parts of the video – normalised to −14 LUFS like YouTube plays
 - ✨ CapCut-style **effects**: cover the subtitles already in the video, filters (Vivid, Warm, Cool, Cinematic,
   Vintage, Black & white), brightness / contrast / saturation, sharpen, mirror, fade in & out, a progress bar,
   your text on the picture (channel name, episode) and animated subtitles (fade or pop)
@@ -56,7 +56,8 @@ The first time, it installs everything by itself (15–30 minutes, mostly downlo
 Khmer AI Dubber: http://127.0.0.1:5000
 ```
 
-If Windows asks for permission to install **Node.js**, **ffmpeg** or **Python**, click **Yes**.
+Nothing is installed on drive C: ffmpeg, Python and (when the PC has none) Node.js are downloaded as portable
+copies into the project folder, and npm's cache and temporary files stay there too.
 If it stops with a message, follow it (see [If something goes wrong](#if-something-goes-wrong)) and run `.\start.cmd` again –
 it continues where it stopped.
 
@@ -86,7 +87,8 @@ git pull
 
 ### What `start.cmd` does
 
-1. Installs **Node.js LTS** with winget if it is not on the PC.
+1. Uses the Node.js on the PC, or downloads a portable Node.js LTS into `bin\node` if there is none. npm's cache
+   (`.cache\npm`) and all temporary files (`tmp\`) are kept in the project folder.
 2. Runs **`npm run setup`** – the first time, and again whenever `scripts/setup.mjs` or `package-lock.json` changed
    (it remembers a fingerprint in `.setup-done.json`). Setup is the table below.
 3. Runs **`npm run build`** when the code changed since the last build.
@@ -101,18 +103,18 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 |---|---|---|---|---|
 | 1 | Checks | Node.js version, free disk space | – | – |
 |   | Node packages | `npm install` (Next.js, React, msedge-tts) | `node_modules/` | ~0.5 GB |
-| 2 | **ffmpeg** | found on the PC, or **installed automatically with winget** (`Gyan.FFmpeg`, full build incl. rubberband) | WinGet's package folder | ~0.2 GB |
+| 2 | **ffmpeg** | **downloaded**: gyan.dev's full build (`.zip` from GitHub; it has rubberband and draws Khmer subtitles correctly – other builds don't), or copied in if that build is already on the PC | `bin/` | ~0.4 GB |
 | 3 | **whisper.cpp** | speech recognition program (newest Windows build) | `bin/whisper/` | small |
 |   | **yt-dlp** | downloads videos from links | `bin/yt-dlp.exe` | small |
 | 4 | Speech models | Whisper `large-v3-turbo` + Silero VAD (skips music and silence) | `models/` | ~0.6 GB |
-| 5 | **Python 3.12** | found on the PC (3.11 or 3.12), or **installed automatically with winget** (`Python.Python.3.12`, for the current user, PATH not changed) | Python's own folder | ~0.1 GB |
+| 5 | **Python 3.12** | a **portable** Python downloaded into the project (nothing installed in Windows); an existing environment made from a Python elsewhere is moved here | `py/python/` | ~0.1 GB |
 |   | Python environment | a private environment just for this app | `py/venv/` | – |
 | 6 | Voice cloning packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, transformers 4.57.6, librosa, … – **exact tested versions** | `py/venv/` | ~1.5 GB |
 |   | Seed-VC | voice conversion code, pinned to the tested version (downloaded as a zip, git not needed) | `py/src/seed-vc/` | small |
 |   | Voice models | Demucs (voice/music separation), Seed-VC, Whisper-small, BigVGAN | `models/hf/` | ~2.7 GB |
 | 7 | Build | `npm run build` | `.next/` | small |
 
-Temporary files and download caches of the Python part also stay in the folder (`py/tmp/`, `py/cache/`).
+Temporary files and download caches stay in the folder too (`tmp/`, `.cache/npm/`, `py/tmp/`, `py/cache/`).
 
 ### Setup options
 
@@ -121,7 +123,7 @@ You normally don't need these: `start.cmd` runs setup for you. To choose options
 
 ```powershell
 npm run setup                   # everything (recommended)
-npm run setup -- --no-clone     # without voice cloning: no Python, ~5 GB less; you get the AI voices only
+npm run setup -- --no-clone     # no Python, ~5 GB less: AI voices only, and the original voices can only be lowered, not removed
 npm run setup -- --all          # also the medium + small Whisper models (faster, less accurate recognition)
 npm run setup -- --no-build     # skip the build at the end
 ```
@@ -133,8 +135,7 @@ npm run setup -- --no-build     # skip the build at the end
 | Message | What to do |
 |---|---|
 | `Node.js 20.9 or newer is needed` | your Node.js is too old: install the current LTS from <https://nodejs.org>, then run `start.cmd` again |
-| `... is missing and winget is not available` | install that program by hand (ffmpeg: <https://www.gyan.dev/ffmpeg/builds/>, Python 3.12: <https://www.python.org>), then run setup again |
-| `... was installed but not found` | close the window and run `start.cmd` again (Windows only sees new programs in new windows) |
+| A download of ffmpeg, Python or Node.js failed | check the internet connection and run `start.cmd` again; or put `ffmpeg.exe` + `ffprobe.exe` into `bin\`, or set `$env:PYTHON` to a Python 3.12 |
 | `running scripts is disabled on this system` | you ran `start.ps1` directly – use `start.cmd` instead |
 | `Only X GB free on D:\` | free some space, or move the project folder to a bigger drive and run `start.cmd` there |
 | A download stopped halfway | run `start.cmd` again – it continues where it stopped |
@@ -160,7 +161,7 @@ the band over old subtitles, the shape, and the sound (levels, bass / treble, ec
 merged until you press **Export**, so editing is instant.
 
 ```text
-┌─ top bar: project · progress · Update voices · Export ─────────────────────────┐
+┌─ top bar: project · progress · Export ─────────────────────────────────────────┐
 │ 📁 🗣 💬 T │ left panel       │          video player          │ right panel     │
 │ 🎨 ✨ 🎵 🏷 │ (choose)         │   ▶ 0:12 / 1:47 · shape · 📷   │ (adjust)        │
 ├───────────┴─────────── timeline: cut · subtitle lines · sound parts ────────────┤
@@ -179,17 +180,20 @@ merged until you press **Export**, so editing is instant.
 5. **🎨 Filters** – Vivid, Warm, Cool, Cinematic, Vintage, B & W; brightness, contrast, saturation, sharpen.
 6. **✨ Effects** – **hide the original subtitles** (a blurred or solid band: move it over the old text while
    watching), mirror, fade in & out, progress bar.
-7. **🎵 Audio** – keep or remove the original sound; *Separate voices from music* (gives the original voices their
-   own level and sound – done once per video); music level between lines and while someone speaks; **your own
-   background music**; the Khmer voice's volume, bass, treble and echo; **volume for parts** of the video
-   (shown in the timeline). Only *pitch* is heard after the voices are updated or the video is exported.
+7. **🎵 Audio** – *Keep original sound* or *Khmer voice only*; **Original voices: Lower / Remove / Custom**
+   (*Remove* is the default: the voices are separated from the music by themselves, in the background, about half
+   a minute for 2 minutes of video, and the preview then plays the music without them); music level between lines
+   and while someone speaks; **your own background music**; the Khmer voice's volume, bass, treble and echo;
+   **volume for parts** of the video (shown in the timeline). Only *pitch* is heard after the voices are remade or
+   the video is exported.
 8. **🏷 Logo** – upload it once; it slides across the picture every 30 s – 5 min.
 9. **⬆ Export** – shape (16:9, 9:16 TikTok, 1:1, 4:5), how the empty space is filled, resolution, quality. **Export**
    merges everything into one MP4 and lists the downloads: the video, Khmer `.srt`, Khmer + original `.srt`,
    original `.srt`, Khmer audio. *Exported* in the player shows the finished file; 📷 renders one exact frame.
 
-**🗣 Update voices** appears when you edited a line or changed the voice: only the changed lines are made again
-(seconds, not minutes). Export does this by itself first if needed.
+**Voice changes apply by themselves**: change the voice, the speed or *sound like the speaker* and the new voices
+are made in a moment; edit a line and its voice is remade 2 s after you stop typing – only what changed, in seconds.
+The player then uses them; no need to export.
 
 You can open a project at a tool and a moment with a link: `http://127.0.0.1:5000/?job=<id>&tab=captions&t=1:30`.
 
@@ -218,13 +222,13 @@ Start with a short clip to try it.
 | Step | Tool |
 |---|---|
 | Download link | `bin/yt-dlp.exe` (YouTube, Facebook, TikTok, Bilibili, … up to 1080p) |
-| Speech → text | whisper.cpp + `large-v3-turbo` (or medium / small), Silero VAD to skip music, word timings |
+| Speech → text | whisper.cpp + `large-v3-turbo` (or medium / small). Silero VAD finds where people speak (on the voices separated from the music when possible); the speech is glued together, recognised, and every word is put back at its real time – a new line at every pause; speech that came back empty is listened to again |
 | Who speaks (AI voices) | pitch of each line (YIN, `lib/voice.ts`) → boy or girl voice |
 | Original voices | Demucs splits voices from music → CAMPPlus voice prints group lines by person and split a line where someone cuts in → a voice sample per person → Seed-VC re-speaks each Khmer line in that person's voice (`scripts/voice_clone.py`, `lib/clone.ts`) |
 | Translate → Khmer | Google Translate, sent in batches so lines keep their context |
 | Khmer voice | Microsoft Edge neural voices via `msedge-tts`, 8 lines in parallel; pitch moved toward the original speaker; long lines spoken faster by the voice itself |
 | Sync | each line fitted into its original time slot (ffmpeg `rubberband`, or `atempo`, at most 1.6× faster), loudness follows the original, short fades against clicks |
-| Soundtrack | original audio lowered while people speak, music kept; with original voices the old voices are removed completely |
+| Soundtrack | original voices removed (Demucs), lowered, or kept at a level you choose; music dips while people speak; your own music mixed in |
 | Output | ffmpeg: video copied as-is, or re-encoded when subtitles are burned in |
 
 ### Folders
@@ -235,7 +239,8 @@ Start with a short clip to try it.
 | `lib/` | `pipeline.ts` (all processing steps), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
 | `branding/` | your logo and uploaded fonts, used for every video | no |
 | `scripts/` | `setup.mjs` (installer), `voice_clone.py` (separation, speakers, cloning) | yes |
-| `bin/`, `models/`, `py/` | downloaded programs, models and the Python environment – made by `npm run setup` | no |
+| `bin/`, `models/`, `py/` | downloaded programs (ffmpeg, whisper.cpp, yt-dlp, a portable Node.js if needed), models, the portable Python (`py/python`) and its environment (`py/venv`) – made by `npm run setup` | no |
+| `tmp/`, `.cache/` | temporary files and npm's download cache (kept off drive C:) | no |
 | `jobs/<id>/` | one folder per video you dub (input, subtitles, voices, output) – delete old ones to free space | no |
 
 Only dub videos you have the rights to use, and only copy people's voices with their permission.

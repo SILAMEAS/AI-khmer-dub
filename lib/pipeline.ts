@@ -8,13 +8,13 @@ import { Readable, Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fs, fsp, path } from "./rt";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
-import { MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
+import { BIN, MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
 import { analyzeLines, median } from "./voice";
 import {
   CRF, FONTS_DIR, logoFile, musicFile, parseFx, parseLogo, parseOut, parseSubStyle, pictureFilter, titleAss,
   type FxOpts, type LogoOpts, type OutOpts, type SubStyle,
 } from "./branding";
-import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample } from "./clone";
+import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample, stemsReady } from "./clone";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
 export type Voice = keyof typeof VOICES;
@@ -81,9 +81,10 @@ export type MixOpts = {
 export type Tone = { pitch: number; bass: number; treble: number; echo: "none" | "room" | "hall" };
 export type Part = { from: number; to: number; orig: number; khmer: number };
 const FLAT: Tone = { pitch: 0, bass: 0, treble: 0, echo: "none" };
+// the original voices are removed by default (separated from the music when the voice tools are installed)
 export const DEFAULT_MIX: MixOpts = {
   music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0,
-  split: false, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
+  split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
 };
 
 const num = (v: unknown, lo: number, hi: number, d: number) =>
@@ -102,7 +103,7 @@ export function parseMix(v: unknown): MixOpts {
   })).filter((x) => x.to > x.from);
   return { music: num(m.music, 0, 100, DEFAULT_MIX.music), duck: duck < 0 ? -1 : duck,
     voice: num(m.voice, -10, 10, DEFAULT_MIX.voice), loudnorm: m.loudnorm !== false, bgm: num(m.bgm, 0, 100, 0),
-    split: m.split === true, voices: num(m.voices, 0, 150, 0), khmerTone: tone(m.khmerTone), origTone: tone(m.origTone),
+    split: m.split === undefined ? DEFAULT_MIX.split : m.split === true, voices: num(m.voices, 0, 150, 0), khmerTone: tone(m.khmerTone), origTone: tone(m.origTone),
     parts };
 }
 /** Cut points from the browser; undefined when the whole video is used. */
@@ -221,6 +222,142 @@ async function download(url: string, jd: string, report: Report): Promise<{ file
 
 // ---------------------------------------------------------------- stage 2: speech to text
 
+/*
+ * Speech recognition. Whisper's own VAD glues the speech together and maps the lines back to the video, but not
+ * the word timings: a line could then stretch over a minute of music with its words in the wrong place, and the
+ * captions showed a stray word while people were talking. So the speech stretches are found here (Silero VAD),
+ * glued with a map of where each piece came from, and every word is put back at its real time. A line is cut at
+ * every real pause, and stretches that came back without words are listened to a second time.
+ */
+const PAUSE = 1.0;     // seconds without words that start a new line
+const STRETCH_PAD = 0.15;
+
+/** Speech stretches (seconds) in a 16 kHz wav, found by Silero VAD; [] when the VAD tool or model is missing. */
+async function speechStretches(wav: string): Promise<[number, number][]> {
+  const exe = path.join(BIN, "whisper", "Release", `whisper-vad-speech-segments${process.platform === "win32" ? ".exe" : ""}`);
+  const vad = path.join(MODELS_DIR, VAD_MODEL);
+  if (!fs.existsSync(exe) || !fs.existsSync(vad)) return [];
+  const out = (await run(exe, ["-np", "-vm", vad, "-f", wav, "-vsd", "300", "-vp", "150", "-t", "8"])).toString();
+  const raw = [...out.matchAll(/start = ([\d.]+), end = ([\d.]+)/g)].map((m) => [+m[1] / 100, +m[2] / 100] as [number, number]);
+  const merged: [number, number][] = [];
+  for (const [x, y] of raw) {
+    const a = Math.max(0, x - STRETCH_PAD), b = y + STRETCH_PAD, last = merged[merged.length - 1];
+    if (last && a <= last[1] + 0.3) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  return merged;
+}
+
+/** Where the 16-bit samples of a WAV file start, and how many bytes they take. */
+function wavData(file: string) {
+  const fd = fs.openSync(file, "r");
+  const head = Buffer.alloc(8192);
+  const got = fs.readSync(fd, head, 0, head.length, 0);
+  for (let p = 12; p + 8 <= got;) {
+    const id = head.toString("latin1", p, p + 4), size = head.readUInt32LE(p + 4);
+    if (id === "data") return { fd, offset: p + 8, bytes: Math.min(size, fs.fstatSync(fd).size - p - 8) };
+    p += 8 + size + (size & 1);
+  }
+  fs.closeSync(fd);
+  throw new Error(`Cannot read the audio file ${path.basename(file)}`);
+}
+
+type TimeMap = { c0: number; c1: number; o0: number }[]; // glued time c0..c1 is video time o0..
+
+/** The speech stretches of a 16 kHz mono wav, one after the other with `gap` s of silence, and where each came from. */
+function glueSpeech(src: string, stretches: [number, number][], out: string, gap: number): TimeMap {
+  const hz = 16000, { fd, offset, bytes } = wavData(src);
+  const outFd = fs.openSync(out, "w");
+  const silence = Buffer.alloc(Math.round(gap * hz) * 2);
+  const map: TimeMap = [];
+  let pos = 44, c = 0; // samples go after the 44-byte header, written last
+  for (const [a, b] of stretches) {
+    const s0 = Math.floor(a * hz), s1 = Math.min(bytes / 2, Math.ceil(b * hz));
+    if (s1 <= s0) continue;
+    if (map.length) { fs.writeSync(outFd, silence, 0, silence.length, pos); pos += silence.length; c += gap; }
+    const buf = Buffer.alloc((s1 - s0) * 2);
+    fs.readSync(fd, buf, 0, buf.length, offset + s0 * 2);
+    fs.writeSync(outFd, buf, 0, buf.length, pos);
+    pos += buf.length;
+    map.push({ c0: c, c1: c + (s1 - s0) / hz, o0: s0 / hz });
+    c += (s1 - s0) / hz;
+  }
+  const h = Buffer.alloc(44), data = pos - 44;
+  h.write("RIFF", 0, "latin1"); h.writeUInt32LE(36 + data, 4); h.write("WAVEfmt ", 8, "latin1");
+  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(hz, 24);
+  h.writeUInt32LE(hz * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write("data", 36, "latin1"); h.writeUInt32LE(data, 40);
+  fs.writeSync(outFd, h, 0, 44, 0);
+  fs.closeSync(outFd);
+  fs.closeSync(fd);
+  return map;
+}
+
+/** Glued time -> video time (a moment in the silence between two pieces goes to the nearer one). */
+function unglue(map: TimeMap, t: number): number {
+  if (!map.length) return t;
+  for (let i = 0; i < map.length; i++) {
+    const m = map[i];
+    if (t < m.c0) {
+      const prev = map[i - 1];
+      return prev && t - prev.c1 < m.c0 - t ? prev.o0 + (prev.c1 - prev.c0) : m.o0;
+    }
+    if (t <= m.c1) return m.o0 + (t - m.c0);
+  }
+  const last = map[map.length - 1];
+  return last.o0 + (last.c1 - last.c0);
+}
+
+type WhisperJson = {
+  transcription?: { text: string; offsets: { from: number; to: number }; tokens?: { text: string; offsets: { from: number; to: number } }[] }[];
+  result?: { language?: string };
+};
+
+/** Whisper lines -> lines in video time, each word at its real time and a new line at every real pause. */
+function toLines(json: WhisperJson, map: TimeMap): RawLine[] {
+  const lines: RawLine[] = [];
+  const wordStart = (t: string) => /^(\s|[　-鿿＀-￯])/.test(t);
+  for (const seg of json.transcription ?? []) {
+    const text = cleanText(seg.text);
+    // skip empty lines and sound tags like [Music] / (音乐)
+    if (!text || /^[\[(（【♪].*[\])）】♪]$/.test(text)) continue;
+    const toks = (seg.tokens ?? []).filter((t) => !t.text.startsWith("[_"))
+      .map((t) => ({ text: t.text, a: unglue(map, t.offsets.from / 1000), b: unglue(map, t.offsets.to / 1000) }));
+    if (!toks.length) {
+      lines.push({ start: unglue(map, seg.offsets.from / 1000), end: unglue(map, seg.offsets.to / 1000), text, words: [] });
+      continue;
+    }
+    const pieces: (typeof toks)[] = [[toks[0]]];
+    for (const t of toks.slice(1)) {
+      const cur = pieces[pieces.length - 1];
+      if (t.a - cur[cur.length - 1].b > PAUSE && wordStart(t.text)) pieces.push([t]);
+      else cur.push(t);
+    }
+    // Chinese characters can come split over two tokens (shown as �): then the line's own text is shared out
+    // over the pieces by their number of tokens, cut at punctuation nearby when there is some
+    const broken = toks.some((t) => t.text.includes("�"));
+    const chars = [...text];
+    let used = 0;
+    pieces.forEach((pc, k) => {
+      let piece: string;
+      if (!broken || pieces.length === 1) piece = pieces.length === 1 ? text : cleanText(pc.map((t) => t.text).join(""));
+      else {
+        let cutAt = k === pieces.length - 1 ? chars.length
+          : Math.round((chars.length * pieces.slice(0, k + 1).reduce((n, x) => n + x.length, 0)) / toks.length);
+        for (let d = 0; d <= 3 && k < pieces.length - 1; d++) {
+          if (/[，。、,.?!？！\s]/.test(chars[cutAt + d - 1] ?? "")) { cutAt += d; break; }
+          if (/[，。、,.?!？！\s]/.test(chars[cutAt - d - 1] ?? "")) { cutAt -= d; break; }
+        }
+        piece = cleanText(chars.slice(used, Math.max(used, cutAt)).join(""));
+        used = Math.max(used, cutAt);
+      }
+      if (!piece) return;
+      const start = pc[0].a, end = Math.max(pc[pc.length - 1].b, start + 0.3);
+      lines.push({ start, end, text: piece, words: broken ? [] : pc.map((t) => ({ text: t.text, at: t.a })) });
+    });
+  }
+  return lines.sort((x, y) => x.start - y.start);
+}
+
 async function transcribe(wav: string, jd: string, lang: string, quality: string, report: Report, also = "") {
   let model = path.join(MODELS_DIR, MODELS[quality] ?? MODELS.best);
   if (!fs.existsSync(model)) {
@@ -229,14 +366,12 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
     model = any;
   }
   const base = path.join(jd, "whisper");
-  const vad = path.join(MODELS_DIR, VAD_MODEL);
 
-  const whisper = async (useVad: boolean, label: string) => {
-    const args = ["-m", model, "-f", wav, "-l", lang === "auto" ? "auto" : lang,
+  const whisper = async (file: string, language: string, label: string): Promise<WhisperJson> => {
+    const args = ["-m", model, "-f", file, "-l", language === "auto" ? "auto" : language,
       "-t", String(Math.min(os.cpus().length, 16)), "-mc", "0", "-bs", "5", // 16 threads: fastest in our tests
-      "-ojf", "-of", base, "-pp"]; // full JSON: word timings, to split a line where the speaker changes
-    if (useVad) args.push("--vad", "-vm", vad, "-vsd", "400", "-vp", "200");
-    if (lang === "zh") args.push("--prompt", "以下是普通话的句子。"); // nudges simplified Chinese + punctuation
+      "-ojf", "-of", base, "-pp"]; // full JSON: the time of every word
+    if (language === "zh") args.push("--prompt", "以下是普通话的句子。"); // nudges simplified Chinese + punctuation
     report("transcribe", 0, label);
     await run(tool("whisper-cli"), args, {
       onLine: (l) => {
@@ -247,23 +382,33 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
     return JSON.parse(fs.readFileSync(base + ".json", "utf8"));
   };
 
-  // VAD skips music and silence, but it can reject singing or speech under loud music
-  // entirely. If it finds nothing, listen to the whole track instead.
-  const hasVad = fs.existsSync(vad);
-  let json = await whisper(hasVad, "Recognising speech");
-  if (hasVad && !(json.transcription ?? []).length) {
-    json = await whisper(false, "No clear speech found - listening to the whole track");
+  report("transcribe", 0, "Finding where people speak");
+  const stretches = await speechStretches(wav);
+  if (!stretches.length) { // no VAD, or it heard nothing (singing, speech under loud music): the whole track
+    const json = await whisper(wav, lang, stretches.length ? "Recognising speech" : "Listening to the whole track");
+    return { lines: toLines(json, []), language: String(json.result?.language ?? lang) };
   }
-  const lines: RawLine[] = [];
-  for (const s of json.transcription ?? []) {
-    const text = cleanText(s.text);
-    // skip empty lines and sound tags like [Music] / (音乐)
-    if (!text || /^[\[(（【♪].*[\])）】♪]$/.test(text)) continue;
-    const words = (s.tokens ?? []).filter((t: { text: string }) => !t.text.startsWith("[_"))
-      .map((t: { text: string; offsets: { from: number } }) => ({ text: t.text, at: t.offsets.from / 1000 }));
-    lines.push({ start: s.offsets.from / 1000, end: s.offsets.to / 1000, text, words });
+  const glued = path.join(jd, "speech16k.wav");
+  const map = glueSpeech(wav, stretches, glued, 0.3);
+  const json = await whisper(glued, lang, "Recognising speech");
+  const language = String(json.result?.language ?? lang);
+  const lines = toLines(json, map);
+
+  // second pass: speech stretches that came back without a single word
+  const missed = stretches.filter(([a, b]) => b - a >= 0.6
+    && !lines.some((l) => l.start < b + 0.2 && l.end > a - 0.2));
+  if (missed.length) {
+    const again = glueSpeech(wav, missed, glued, 0.5);
+    const more = toLines(await whisper(glued, language, `Listening again to ${missed.length} missed part${missed.length > 1 ? "s" : ""}`), again);
+    lines.push(...more);
+    lines.sort((x, y) => x.start - y.start);
   }
-  return { lines, language: String(json.result?.language ?? lang) };
+  fs.rmSync(glued, { force: true });
+  if (!lines.length) { // speech was found but nothing understood: listen to the whole track once more
+    const json = await whisper(wav, lang, "Listening to the whole track");
+    return { lines: toLines(json, []), language: String(json.result?.language ?? language) };
+  }
+  return { lines, language };
 }
 
 /** A whisper line with the start time of each word, before lines are glued into sentences. */
@@ -388,7 +533,20 @@ function analyzeSpeakers(jd: string, segs: Segment[], report: Report) {
 
 export async function prepare(jd: string, opts: Opts, report: Report): Promise<Meta> {
   let src: string, title = opts.title || "video";
-  if (opts.url) ({ file: src, title } = await download(opts.url, jd, report));
+  // a video downloaded before (the first try failed later on) is used again instead of downloading it twice
+  const downloaded = opts.url ? fs.readdirSync(jd).find((n) => /^input\.(mp4|mkv|webm|mov)$/i.test(n)) : undefined;
+  if (opts.url && downloaded) {
+    src = path.join(jd, downloaded);
+    if (!opts.title) { // made before titles were kept: ask the site for the title only (no download)
+      const out = await run(tool("yt-dlp"), [opts.url, "--no-playlist", "--skip-download", "--encoding", "utf-8", "--print", "title"])
+        .catch(() => Buffer.from(""));
+      opts.title = out.toString("utf8").trim().split(/\r?\n/)[0] || "video";
+    }
+    title = opts.title;
+  } else if (opts.url) {
+    ({ file: src, title } = await download(opts.url, jd, report));
+    opts.title = title;
+  }
   else src = path.join(jd, opts.inputName!);
 
   if (opts.trim) src = await cut(jd, src, opts.trim, report);
@@ -398,17 +556,21 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
 
-  // voice cloning: split voices from music at the same time as the speech is recognised (they don't depend
-  // on each other, and running both at once finishes sooner than one after the other)
-  const separating = opts.voice === "clone" ? separate(jd, src, duration, () => {}) : null;
-  separating?.catch(() => {}); // a failure is reported where it is awaited
-  const { lines, language } = await transcribe(wav, jd, opts.sourceLang, opts.quality, report,
-    separating ? " (and separating voices from music)" : "");
-  if (!lines.length) throw new Error("No speech was detected in this video");
-  if (separating) {
-    report("separate", 0.9, "Separating voices from music");
-    await separating;
+  // voices apart from the music first (when wanted): speech under music is then recognised far better
+  let speechWav = wav;
+  if (opts.voice === "clone" || wantsStems(opts)) {
+    try {
+      report("separate", 0, "Separating voices from music");
+      await separate(jd, src, duration, (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
+      speechWav = path.join(jd, "vocals16k.wav");
+      await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, VOCALS), "-ac", "1", "-ar", "16000", speechWav]);
+    } catch (e) {
+      if (opts.voice === "clone") throw e; // cloning needs the voices; otherwise the full sound will do
+      console.error(e);
+    }
   }
+  const { lines, language } = await transcribe(speechWav, jd, opts.sourceLang, opts.quality, report);
+  if (!lines.length) throw new Error("No speech was detected in this video");
   const meta: Meta = { input: path.basename(src), title, duration, language, segments: 0 };
   const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
   meta.segments = segs.length;
@@ -818,7 +980,7 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
   // voices and music as separate tracks (voice cloning, or asked for): the voices get their own level and sound,
   // and the music only dips a little under the dub
   const bg = path.join(jd, BACKGROUND), vocals = path.join(jd, VOCALS);
-  const stems = (opts.voice === "clone" || m.split) && fs.existsSync(bg) && fs.existsSync(vocals);
+  const stems = (opts.voice === "clone" || m.split) && stemsReady(jd, duration);
   const high = m.music / 100;
   const low = m.duck >= 0 ? m.duck / 100 : ((stems ? 0.5 : 0.12) * high) / 0.8; // automatic: follows the music level
   const music = m.bgm > 0 ? musicFile() : null;
@@ -986,16 +1148,25 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): P
  */
 async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, report: Report): Promise<Clip[]> {
   const src = path.join(jd, meta.input);
-  if (parseMix(opts.mix).split && opts.bgMode === "duck") { // done once per video, then kept
-    if (!cloneAvailable()) throw new Error("Separating voices from music needs the voice tools - run: npm run setup");
-    report("separate", 0, "Separating voices from music");
-    await separate(jd, src, meta.duration,
-      (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
-  }
+  if (wantsStems(opts)) await separateVoices(jd, meta, report); // done once per video, then kept
   const clips = await placeClips(segs, path.join(jd, "tts"), meta.duration, opts.match !== false, opts.voice === "clone", report);
   await writeVoiceTrack(jd, clips, meta.duration);
   writeSubs(jd, timedSubs(segs, clips, meta.duration));
   return clips;
+}
+
+/**
+ * Whether the original voices are to be handled apart from the music (removed or at their own level). Without the
+ * voice tools they can't be separated: the original sound is then only lowered under the Khmer.
+ */
+const wantsStems = (opts: Opts) => parseMix(opts.mix).split && opts.bgMode === "duck" && cloneAvailable();
+
+/** Splits the original sound into voices and music & effects (vocals.wav, background.wav); kept once made. */
+export async function separateVoices(jd: string, meta: Meta, report: Report) {
+  if (!cloneAvailable()) throw new Error("Separating voices from music needs the voice tools - run: npm run setup");
+  report("separate", 0, "Separating voices from music");
+  await separate(jd, path.join(jd, meta.input), meta.duration,
+    (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
 }
 
 /** Export: merge every layer, with the settings chosen in the editor, into one video. */

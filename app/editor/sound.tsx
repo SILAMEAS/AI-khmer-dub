@@ -212,10 +212,13 @@ function ToneControls({ value: t, onChange, echo = true, live }: { value: Tone; 
   );
 }
 
+/** Where the separation of voices and music stands, for the status under "Original voices". */
+export type StemState = { ready: boolean; task?: { progress: number; message: string }; error?: string; project: boolean };
+
 /** Original sound and your music (left panel of Audio). */
-export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, clone, brand, reload }: MixProps & {
+export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, clone, brand, reload, stems, onRetry }: MixProps & {
   bgMode: "duck" | "none"; onBgMode: (b: "duck" | "none") => void; canSplit: boolean; clone: boolean;
-  brand: Branding | null; reload: () => void;
+  brand: Branding | null; reload: () => void; stems: StemState; onRetry: () => void;
 }) {
   const set = (p: Partial<Mix>) => onChange({ ...m, ...p });
   const keep = bgMode === "duck", split = clone || m.split;
@@ -241,26 +244,30 @@ export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, c
     <div className="pane">
       <h4>Original sound</h4>
       <div className="seg-btns">
-        <button type="button" className={keep ? "on" : ""} onClick={() => onBgMode("duck")}>Keep under the Khmer</button>
-        <button type="button" className={!keep ? "on" : ""} onClick={() => onBgMode("none")}>Remove</button>
+        <button type="button" className={keep ? "on" : ""} onClick={() => onBgMode("duck")}>Keep original sound</button>
+        <button type="button" className={!keep ? "on" : ""} onClick={() => onBgMode("none")} title="No music, no effects, no original voices">Khmer voice only</button>
       </div>
-      <label className="check">
-        <input type="checkbox" checked={split} disabled={clone || !canSplit || !keep} onChange={(e) => set({ split: e.target.checked })} />
-        <span>Separate voices from music
-          <small>{clone ? "Always with Original voices" : canSplit
-            ? "Gives the original voices their own level and sound. Done on the next Apply (a few minutes, once)."
-            : "Needs the voice tools: npm run setup"}</small></span>
-      </label>
       <fieldset className="pane-group" disabled={!keep}>
+        <label className="f">Original voices (the Chinese / English speech)</label>
+        <div className="seg-btns">
+          {!clone && <button type="button" className={!split ? "on" : ""} onClick={() => set({ split: false })}
+            title="Kept in the original sound, lowered while the Khmer speaks">Lower</button>}
+          <button type="button" className={split && !m.voices ? "on" : ""} disabled={!canSplit && !clone}
+            onClick={() => set({ split: true, voices: 0 })}>Remove</button>
+          <button type="button" className={split && m.voices > 0 ? "on" : ""} disabled={!canSplit && !clone}
+            onClick={() => set({ split: true, voices: m.voices || 15 })} title="Quietly under the Khmer, like a documentary">Custom</button>
+        </div>
+        {split && m.voices > 0 && (
+          <label className="slider-row"><span>Voice level</span>
+            <input type="range" min={5} max={100} step={5} value={m.voices} onChange={(e) => set({ voices: +e.target.value })} /><b>{m.voices}%</b></label>
+        )}
+        {!canSplit && !clone ? <small className="note">Removing them needs the voice tools (npm run setup); until then they can only be lowered.</small>
+          : split && <StemStatus stems={stems} onRetry={onRetry} />}
         <label className="slider-row"><span>{split ? "Music & effects" : "Original sound"}</span>
           <input type="range" min={0} max={100} step={5} value={m.music} onChange={(e) => set({ music: +e.target.value })} /><b>{m.music}%</b></label>
         <label className="slider-row"><span>…while someone speaks</span>
           <input type="range" min={0} max={100} step={5} value={m.duck < 0 ? 15 : m.duck} disabled={m.duck < 0} onChange={(e) => set({ duck: +e.target.value })} />
           <label className="check inline"><input type="checkbox" checked={m.duck < 0} onChange={(e) => set({ duck: e.target.checked ? -1 : 15 })} /><span>Auto</span></label></label>
-        <label className="slider-row"><span>Original voices</span>
-          <input type="range" min={0} max={100} step={5} value={m.voices} disabled={!split} onChange={(e) => set({ voices: +e.target.value })}
-            title="0 = removed; e.g. 15% keeps them quietly under the Khmer, like a documentary" />
-          <b>{split ? (m.voices ? `${m.voices}%` : "off") : "—"}</b></label>
       </fieldset>
 
       <h4>Your background music</h4>
@@ -278,6 +285,20 @@ export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, c
         <span>Normalise loudness<small>−14 LUFS, as YouTube, Facebook and TikTok play (applied on export)</small></span></label>
     </div>
   );
+}
+
+/** Whether the voices are separated yet: the preview can only leave them out once they are. */
+function StemStatus({ stems, onRetry }: { stems: StemState; onRetry: () => void }) {
+  if (!stems.project) return <small className="note">They are separated from the music while the video is processed.</small>;
+  if (stems.ready) return <small className="ok-note">✓ Separated – the preview plays the music without them.</small>;
+  if (stems.task) return (
+    <div className="stem-wait">
+      <small className="note">Separating voices from music… {Math.round(stems.task.progress * 100)}% – until then the preview still has them.</small>
+      <div className="mini-bar wide"><i style={{ width: `${stems.task.progress * 100}%` }} /></div>
+    </div>
+  );
+  if (stems.error) return <div className="err">{stems.error} <button type="button" className="btn ghost sm" onClick={onRetry}>Try again</button></div>;
+  return <small className="note">Starting to separate them from the music…</small>;
 }
 
 /** Khmer voice, original voice sound and per-part levels (right panel of Audio). */

@@ -5,8 +5,8 @@
 //   npm run setup -- --all         also the medium + small Whisper models
 //   npm run setup -- --no-build    don't build the app at the end
 //
-// Large files stay inside this folder (bin/, models/, py/), on whatever drive the project is on.
-// Missing programs (ffmpeg, Python) are installed with winget.
+// Everything stays inside this folder (bin/, models/, py/), on whatever drive the project is on - nothing is
+// installed on the system drive: ffmpeg goes to bin/, a portable Python to py/python (downloaded when missing).
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -70,15 +70,6 @@ function tryRun(cmd, cmdArgs) {
   } catch { return null; }
 }
 
-function winget(id, label, extra = []) {
-  if (!win || tryRun("winget", ["--version"]) === null) {
-    fail(`${label} is missing and winget is not available. Install ${label} yourself, then run npm run setup again.`);
-  }
-  console.log(`  Installing ${label} with winget (a Windows prompt may appear)...`);
-  execFileSync("winget", ["install", "-e", "--id", id, ...extra, "--silent",
-    "--accept-source-agreements", "--accept-package-agreements"], { stdio: "inherit" });
-}
-
 // ---------------------------------------------------------------- 1. checks + node packages
 
 step("Checking this PC and installing Node packages");
@@ -115,11 +106,50 @@ function findFfmpeg() {
   }
   return dirs.map((d) => d && path.join(d, exe)).find((p) => p && fs.existsSync(p)) || null;
 }
-let ffmpeg = findFfmpeg();
+const inBin = (name) => path.join(bin, win ? `${name}.exe` : name);
+fs.mkdirSync(bin, { recursive: true });
+let ffmpeg = fs.existsSync(inBin("ffmpeg")) && fs.existsSync(inBin("ffprobe")) ? inBin("ffmpeg") : null;
 if (!ffmpeg) {
-  winget("Gyan.FFmpeg", "ffmpeg");
-  ffmpeg = findFfmpeg();
-  if (!ffmpeg) fail("ffmpeg was installed but not found - open a new terminal and run npm run setup again.");
+  const elsewhere = findFfmpeg();
+  // on Windows only a gyan.dev build is copied: other builds tested do not draw Khmer subtitles correctly
+  const usable = elsewhere && fs.existsSync(path.join(path.dirname(elsewhere), win ? "ffprobe.exe" : "ffprobe"))
+    && (!win || (tryRun(elsewhere, ["-hide_banner", "-version"]) ?? "").includes("gyan.dev"));
+  if (usable) {
+    // installed somewhere else (e.g. by winget on the system drive): keep a copy here
+    for (const n of ["ffmpeg", "ffprobe"]) fs.copyFileSync(path.join(path.dirname(elsewhere), path.basename(inBin(n))), inBin(n));
+    ok(`ffmpeg copied into ./bin (from ${path.dirname(elsewhere)})`);
+  } else if (win) {
+    // gyan.dev's full build, straight into ./bin: it has rubberband, and its subtitle renderer shapes Khmer
+    // correctly (other builds tested draw subscript consonants and vowels out of place). The same build is on
+    // GitHub as a .zip (faster, and every Windows can unpack it); gyan.dev's own .7z is the fallback.
+    let url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z", ext = ".7z";
+    try {
+      const rel = await (await fetch("https://api.github.com/repos/GyanD/codexffmpeg/releases/latest",
+        { headers: { "User-Agent": "khmer-dubber" } })).json();
+      const asset = rel.assets?.find((a) => /full_build\.zip$/.test(a.name));
+      if (asset) ({ browser_download_url: url } = asset), ext = ".zip";
+    } catch { /* GitHub not reachable: gyan.dev */ }
+    const archive = path.join(bin, "ffmpeg" + ext), tmpDir = path.join(bin, "ffmpeg-tmp");
+    await download(url, archive, "ffmpeg (full build)");
+    try {
+      unzip(archive, tmpDir); // Windows' tar reads .zip (and .7z on Windows 11)
+    } catch { // a .7z on older Windows: 7-Zip's own small command-line extractor
+      const sevenZip = path.join(bin, "7zr.exe");
+      await download("https://www.7-zip.org/a/7zr.exe", sevenZip, "7-Zip extractor");
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      execFileSync(sevenZip, ["x", archive, `-o${tmpDir}`, "-y"], { stdio: "ignore", windowsHide: true });
+    }
+    for (const n of ["ffmpeg.exe", "ffprobe.exe"]) {
+      const f = findFile(tmpDir, n);
+      if (!f) fail(`${n} was not found in the ffmpeg download`);
+      fs.copyFileSync(f, path.join(bin, n));
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(archive, { force: true });
+  } else {
+    fail("ffmpeg is missing: install it (e.g. sudo apt install ffmpeg), then run npm run setup again.");
+  }
+  ffmpeg = inBin("ffmpeg");
 }
 ok(`ffmpeg: ${ffmpeg}`);
 const filters = tryRun(ffmpeg, ["-hide_banner", "-filters"]) || "";
@@ -171,6 +201,21 @@ if (wantClone) {
   const sh = (cmd, cmdArgs) => execFileSync(cmd, cmdArgs, { stdio: "inherit", env });
   const venvPy = path.join(py, "venv", win ? "Scripts/python.exe" : "bin/python");
 
+  /** The portable Python kept in ./py/python (3.12, the version the pinned packages were tested with). */
+  const ownPython = path.join(py, "python", win ? "python.exe" : "bin/python3");
+  async function portablePython() {
+    if (fs.existsSync(ownPython)) return ownPython;
+    if (!win) return null;
+    // the "python" NuGet package is a complete Python (venv and pip included) that needs no installer
+    const pkg = path.join(py, "python.nupkg"), tmpDir = path.join(py, "python-tmp");
+    await download("https://www.nuget.org/api/v2/package/python/3.12.10", pkg, "Python 3.12 (portable)");
+    unzip(pkg, tmpDir);
+    fs.renameSync(path.join(tmpDir, "tools"), path.join(py, "python"));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(pkg, { force: true });
+    return fs.existsSync(ownPython) ? ownPython : null;
+  }
+
   /** A Python 3.11 or 3.12 on this PC (the versions the pinned packages were tested with). */
   function findPython() {
     const ask = "import sys; print(sys.executable); print('%d.%d' % sys.version_info[:2])";
@@ -188,18 +233,26 @@ if (wantClone) {
     return null;
   }
 
-  // a venv whose base Python was uninstalled no longer starts: build a new one
+  // A venv made from a Python outside this folder (e.g. on the system drive): copy that Python into
+  // ./py/python and point the venv at it, so everything lives here (the packages stay as they are).
+  const cfgFile = path.join(py, "venv", "pyvenv.cfg");
+  if (win && fs.existsSync(cfgFile) && !fs.existsSync(ownPython)) {
+    const home = (fs.readFileSync(cfgFile, "utf8").match(/^home\s*=\s*(.+)$/m) ?? [])[1]?.trim();
+    if (home && fs.existsSync(path.join(home, "python.exe")) && !path.resolve(home).startsWith(root)) {
+      console.log(`  Moving the Python this app uses into ./py/python (from ${home})`);
+      fs.cpSync(home, path.join(py, "python"), { recursive: true });
+      fs.writeFileSync(cfgFile, fs.readFileSync(cfgFile, "utf8").split(home).join(path.join(py, "python")));
+    }
+  }
+  // a venv whose base Python was removed no longer starts: build a new one
   if (fs.existsSync(venvPy) && tryRun(venvPy, ["-c", "print(1)"]) !== "1") {
     console.log("  The Python environment is broken (its Python was removed) - rebuilding it");
     fs.rmSync(path.join(py, "venv"), { recursive: true, force: true });
   }
   if (!fs.existsSync(venvPy)) {
-    let base = findPython();
-    if (!base) {
-      winget("Python.Python.3.12", "Python 3.12", ["--scope", "user"]);
-      base = findPython();
-      if (!base) fail("Python 3.12 was installed but not found - open a new terminal and run npm run setup again.");
-    }
+    let base = process.env.PYTHON ? findPython() : await portablePython();
+    if (!base) base = findPython(); // not Windows: the system's python3.11 / 3.12
+    if (!base) fail("Python 3.11 or 3.12 is needed - install it, or set PYTHON to its python.exe, then run npm run setup again.");
     ok(`Python: ${base}`);
     sh(base, ["-m", "venv", path.join(py, "venv")]);
   }

@@ -1,10 +1,16 @@
 "use client";
 
-/** The timeline at the bottom: ruler and playhead, the cut, subtitle lines and sound parts. */
+/**
+ * The timeline at the bottom: ruler and playhead, the cut, subtitle lines and sound parts.
+ * One scroll area (so the horizontal scrollbar is always at the bottom); the ruler stays on top and the track
+ * names on the left while scrolling. Ctrl + mouse wheel zooms around the pointer.
+ */
 import { useEffect, useRef, useState } from "react";
 import { clock, type Part, type Segment } from "./common";
 
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+const LABEL = 96;   // width of the track names column (px)
+const MAX_ZOOM = 30;
 
 export function Timeline({ duration, time, onSeek, segs, edited, selected, onSelect, parts, selectedPart, onSelectPart,
   trim, onTrim, speakers }: {
@@ -25,7 +31,7 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
   }, []);
 
   const d = Math.max(duration, 1);
-  const pps = ((width - 16) / d) * zoom; // pixels per second
+  const pps = ((width - LABEL - 16) / d) * zoom; // pixels per second
   const x = (t: number) => t * pps;
   const step = STEPS.find((s) => s * pps >= 70) ?? 600;
 
@@ -33,15 +39,34 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
   useEffect(() => {
     const el = scroller.current;
     if (!el || zoom === 1) return;
-    const px = x(time);
-    if (px < el.scrollLeft || px > el.scrollLeft + el.clientWidth - 40) el.scrollLeft = px - el.clientWidth * 0.2;
+    const px = x(time), view = el.clientWidth - LABEL;
+    if (px < el.scrollLeft || px > el.scrollLeft + view - 40) el.scrollLeft = px - view * 0.2;
   }, [time, zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ctrl + wheel: zoom, keeping the moment under the pointer where it is
+  const zoomRef = useRef({ zoom, pps });
+  zoomRef.current = { zoom, pps };
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const wheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const { zoom: z, pps: p } = zoomRef.current;
+      const next = Math.min(MAX_ZOOM, Math.max(1, z * (e.deltaY < 0 ? 1.25 : 0.8)));
+      const px = e.clientX - el.getBoundingClientRect().left - LABEL + el.scrollLeft, t = px / p;
+      setZoom(next);
+      requestAnimationFrame(() => { el.scrollLeft = t * p * (next / z) - (px - el.scrollLeft); });
+    };
+    el.addEventListener("wheel", wheel, { passive: false });
+    return () => el.removeEventListener("wheel", wheel);
+  }, []);
 
   /** Dragging: the playhead (seek) or a cut handle. */
   const drag = (e: React.PointerEvent, what: "seek" | "from" | "to") => {
     const el = scroller.current!;
     const rect = el.getBoundingClientRect();
-    const at = (cx: number) => Math.max(0, Math.min(d, (cx - rect.left + el.scrollLeft) / pps));
+    const at = (cx: number) => Math.max(0, Math.min(d, (cx - rect.left - LABEL + el.scrollLeft) / pps));
     const apply = (cx: number) => {
       const t = at(cx);
       if (what === "seek") onSeek(t);
@@ -70,18 +95,21 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
     <div className="timeline">
       <div className="tl-bar">
         <span className="note">{segs ? `${segs.length} lines` : "Timeline"}{edited.size ? ` · ${edited.size} edited` : ""}</span>
-        <label className="row nowrap tl-zoom">🔍
-          <input type="range" min={1} max={30} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} />
-        </label>
-      </div>
-      <div className="tl-body">
-        <div className="tl-labels">
-          <div className="tl-ruler-label" />
-          <div>🎬 Video</div>
-          <div>💬 Subtitles</div>
-          <div>🔊 Sound</div>
+        <div className="row nowrap tl-zoom">
+          <button type="button" onClick={() => setZoom((z) => Math.max(1, z / 1.5))} title="Zoom out" disabled={zoom <= 1}>－</button>
+          <input type="range" min={1} max={MAX_ZOOM} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} title="Zoom (Ctrl + wheel)" />
+          <button type="button" onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * 1.5))} title="Zoom in" disabled={zoom >= MAX_ZOOM}>＋</button>
+          <button type="button" onClick={() => setZoom(1)} title="Show the whole video" disabled={zoom === 1}>Fit</button>
         </div>
-        <div className="tl-scroll" ref={scroller}>
+      </div>
+      <div className="tl-scroll" ref={scroller}>
+        <div className="tl-grid" style={{ width: LABEL + full }}>
+          <div className="tl-labels">
+            <div className="tl-corner" />
+            <div>🎬 Video</div>
+            <div>💬 Subtitles</div>
+            <div>🔊 Sound</div>
+          </div>
           <div className="tl-content" style={{ width: full }} onPointerDown={(e) => drag(e, "seek")}>
             <div className="tl-ruler">
               {ticks.map((s) => <span key={s} style={{ left: x(s) }}>{clock(s)}</span>)}
@@ -102,7 +130,7 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
                 <div key={i} className={`tl-clip sub ${speakers ? `spk s${(s.speaker ?? 0) % 6}` : ""} ${selected === i ? "on" : ""} ${s.km.trim() ? "" : "empty"}`}
                   style={{ left: x(s.start), width: Math.max(4, x(s.end - s.start) - 1) }} title={`${clock(s.start)} ${s.km}`}
                   onPointerDown={(e) => { e.stopPropagation(); onSelect(i); onSeek(s.start); }}>
-                  {edited.has(i) && <i className="dot" title="Edited: the voice is made again on Update voices" />}
+                  {edited.has(i) && <i className="dot" title="Edited: its voice is made again in a moment" />}
                   <span className="km">{s.km}</span>
                 </div>
               ))}

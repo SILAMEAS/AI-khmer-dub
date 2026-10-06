@@ -39,11 +39,13 @@ export const DEFAULT_LOGO: LogoOpts = { enabled: false, size: 12, every: 60, dur
  */
 export type OutOpts = {
   aspect: "original" | "16:9" | "9:16" | "1:1" | "4:5";
-  fit: "blur" | "crop" | "bars";
+  fit: "blur" | "crop" | "bars" | "color"; // color: a plain background in `canvas`
+  canvas: string;
   size: 0 | 480 | 720 | 1080;
   quality: "high" | "standard" | "small";
+  fps: 0 | 24 | 25 | 30 | 60; // 0: as the source
 };
-export const DEFAULT_OUT: OutOpts = { aspect: "original", fit: "blur", size: 0, quality: "standard" };
+export const DEFAULT_OUT: OutOpts = { aspect: "original", fit: "blur", canvas: "#000000", size: 0, quality: "standard", fps: 0 };
 export const CRF: Record<OutOpts["quality"], number> = { high: 18, standard: 21, small: 26 };
 const ASPECTS: Record<Exclude<OutOpts["aspect"], "original">, number> = { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1, "4:5": 4 / 5 };
 
@@ -132,10 +134,66 @@ export function parseOut(v: unknown): OutOpts {
   const pick = <T,>(x: unknown, ok: readonly T[], d: T): T => (ok.includes(x as T) ? (x as T) : d);
   return {
     aspect: pick(s.aspect, ["original", "16:9", "9:16", "1:1", "4:5"] as const, DEFAULT_OUT.aspect),
-    fit: pick(s.fit, ["blur", "crop", "bars"] as const, DEFAULT_OUT.fit),
+    fit: pick(s.fit, ["blur", "crop", "bars", "color"] as const, DEFAULT_OUT.fit),
+    canvas: hex(s.canvas, DEFAULT_OUT.canvas),
     size: pick(Number(s.size), [0, 480, 720, 1080] as const, DEFAULT_OUT.size),
     quality: pick(s.quality, ["high", "standard", "small"] as const, DEFAULT_OUT.quality),
+    fps: pick(Number(s.fps), [0, 24, 25, 30, 60] as const, DEFAULT_OUT.fps),
   };
+}
+
+// ---------------------------------------------------------------- texts on the timeline
+
+/**
+ * A text shown from `from` to `to` (seconds of the source), centred at x / y (% of the picture), in its own style.
+ * Sizes are in the subtitles' units (a 288-line-high picture).
+ */
+export type TextItem = {
+  id: string; text: string; from: number; to: number; x: number; y: number;
+  font: string; size: number; bold: boolean; color: string; outline: string; outlineWidth: number;
+  box: boolean; boxColor: string; boxOpacity: number; anim: "none" | "fade" | "pop";
+};
+export function parseTexts(v: unknown): TextItem[] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, 100).map((t, i): TextItem => {
+    const s = (t && typeof t === "object" ? t : {}) as Partial<Record<keyof TextItem, unknown>>;
+    const from = clamp(s.from, 0, 1e6, 0);
+    return {
+      id: typeof s.id === "string" ? s.id.slice(0, 40) : `t${i}`,
+      // into an .ass file: braces and backslashes would be read as commands
+      text: typeof s.text === "string" ? s.text.replace(/[{}\\]/g, "").slice(0, 300) : "",
+      from, to: Math.max(from + 0.1, clamp(s.to, 0, 1e6, from + 3)),
+      x: clamp(s.x, 0, 100, 50), y: clamp(s.y, 0, 100, 50),
+      font: fontName(s.font, DEFAULT_SUB.font), size: clamp(s.size, 6, 80, 22), bold: s.bold !== false,
+      color: hex(s.color, "#ffffff"), outline: hex(s.outline, "#000000"), outlineWidth: clamp(s.outlineWidth, 0, 8, 2),
+      box: s.box === true, boxColor: hex(s.boxColor, "#000000"), boxOpacity: clamp(s.boxOpacity, 0, 1, 0.6),
+      anim: s.anim === "fade" || s.anim === "pop" ? s.anim : "none",
+    };
+  }).filter((t) => t.text.trim());
+}
+
+const assTime = (t: number) => {
+  const cs = Math.round(Math.max(0, t) * 100);
+  const h = Math.floor(cs / 360000), m = Math.floor((cs % 360000) / 6000), sec = Math.floor((cs % 6000) / 100);
+  return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs % 100).padStart(2, "0")}`;
+};
+
+/** The texts as one .ass file for a picture `width` x `height` (positions in its 288-line-high units). */
+export function textsAss(texts: TextItem[], width: number, height: number): string {
+  const resX = Math.round((288 * width) / height);
+  const style = (t: TextItem, i: number) => {
+    const back = assColour(t.boxColor, t.boxOpacity);
+    return `Style: X${i},${t.font},${t.size},${assColour(t.color)},${assColour(t.color)},${t.box ? back : assColour(t.outline)},${back},`
+      + `${t.bold ? -1 : 0},0,0,0,100,100,0,0,${t.box ? 3 : 1},${t.box ? Math.max(2, t.outlineWidth) : t.outlineWidth},0,5,0,0,0,1`;
+  };
+  const anim = { none: "", fade: "\\fad(180,120)", pop: "\\fscx70\\fscy70\\t(0,160,\\fscx100\\fscy100)" };
+  return ["[Script Info]", "ScriptType: v4.00+", `PlayResX: ${resX}`, "PlayResY: 288", "WrapStyle: 0", "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    ...texts.map(style), "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ...texts.map((t, i) => `Dialogue: ${i},${assTime(t.from)},${assTime(t.to)},X${i},,0,0,0,,`
+      + `{\\an5\\pos(${Math.round((resX * t.x) / 100)},${Math.round((288 * t.y) / 100)})${anim[t.anim]}}${t.text.replace(/\r?\n/g, "\\N")}`),
+    ""].join("\n");
 }
 
 /** Output picture size for this format (even numbers, as x264 needs). */
@@ -317,7 +375,7 @@ export function forceStyle(s: SubStyle): string {
  */
 export function pictureFilter(o: {
   burn: boolean; sub: SubStyle; logo: LogoOpts | null; logoInput: number; width: number; height: number; shift?: number;
-  out?: OutOpts; srt?: string; fx?: FxOpts; title?: string; duration?: number;
+  out?: OutOpts; srt?: string; fx?: FxOpts; title?: string; duration?: number; texts?: string;
 }): string | null {
   const steps: string[] = [];
   let last = "0:v";
@@ -353,8 +411,9 @@ export function pictureFilter(o: {
         `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[f]`);
     } else if (fit === "crop") {
       steps.push(`[${last}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[f]`);
-    } else {
-      steps.push(`[${last}]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[f]`);
+    } else { // black bars, or a background colour of your choice
+      const pad = fit === "color" ? o.out!.canvas.replace("#", "0x") : "black";
+      steps.push(`[${last}]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${pad},setsar=1[f]`);
     }
     last = "f";
   }
@@ -367,6 +426,11 @@ export function pictureFilter(o: {
     const fontsdir = path.relative(path.join(ROOT, "jobs", "x"), FONTS_DIR).split(path.sep).join("/");
     steps.push(`[${last}]subtitles=${o.title}:fontsdir='${fontsdir}'[ti]`);
     last = "ti";
+  }
+  if (o.texts) {
+    const fontsdir = path.relative(path.join(ROOT, "jobs", "x"), FONTS_DIR).split(path.sep).join("/");
+    steps.push(`[${last}]subtitles=${o.texts}:fontsdir='${fontsdir}'[tx]`);
+    last = "tx";
   }
   if (o.logo?.enabled) {
     const { every: E, duration: D } = o.logo;
@@ -388,6 +452,7 @@ export function pictureFilter(o: {
     steps.push(`[${last}]fade=t=in:st=0:d=0.6,fade=t=out:st=${(dur - 0.6).toFixed(3)}:d=0.6[fd]`);
     last = "fd";
   }
+  if (o.out?.fps && !o.shift) { steps.push(`[${last}]fps=${o.out.fps}[fr]`); last = "fr"; }
   if (last === "0:v") return null;
   steps.push(`[${last}]format=yuv420p[v]`);
   return steps.join(";");
