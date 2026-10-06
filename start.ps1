@@ -12,6 +12,14 @@ function Update-PathFromSystem {
               [Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+# Already running (e.g. start.cmd double-clicked twice)? Just show it.
+try {
+  Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5000/api/capabilities -TimeoutSec 2 | Out-Null
+  Write-Host "Khmer AI Dubber is already running: http://127.0.0.1:5000"
+  Start-Process "http://127.0.0.1:5000"
+  exit 0
+} catch { }
+
 # 1. Node.js
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -28,7 +36,12 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 # 2. Setup: the first time, and again when the installer or the packages changed (e.g. after git pull).
 #    npm run setup writes .setup-done.json with the same fingerprint when it finishes.
 $marker = ".setup-done.json"
-$fingerprint = (Get-FileHash scripts\setup.mjs, package-lock.json -Algorithm SHA256 | ForEach-Object { $_.Hash }) -join ""
+#    (line endings are ignored: git may check the same file out with CRLF or LF)
+$sha = [Security.Cryptography.SHA256]::Create()
+$fingerprint = (@("scripts\setup.mjs", "package-lock.json") | ForEach-Object {
+  $text = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $_), [Text.Encoding]::UTF8).Replace("`r", "")
+  -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString("X2") })
+}) -join ""
 $done = $null
 if (Test-Path $marker) { $done = Get-Content $marker -Raw | ConvertFrom-Json }
 if (-not $done -or $done.fingerprint -ne $fingerprint) {

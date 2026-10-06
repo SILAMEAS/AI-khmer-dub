@@ -244,8 +244,9 @@ else {
 }
 
 // start.ps1 runs setup again only when this fingerprint no longer matches (installer or packages changed)
-const fingerprint = ["scripts/setup.mjs", "package-lock.json"]
-  .map((f) => createHash("sha256").update(fs.readFileSync(path.join(root, f))).digest("hex").toUpperCase()).join("");
+// (line endings ignored: git may check the same file out with CRLF or LF)
+const fingerprint = ["scripts/setup.mjs", "package-lock.json"].map((f) => createHash("sha256")
+  .update(fs.readFileSync(path.join(root, f), "utf8").replace(/\r/g, ""), "utf8").digest("hex").toUpperCase()).join("");
 fs.writeFileSync(path.join(root, ".setup-done.json"),
   JSON.stringify({ fingerprint, args: args.filter((a) => a !== "--no-build"), at: new Date().toISOString() }, null, 1));
 
