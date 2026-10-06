@@ -2,7 +2,6 @@
  * Speaker analysis: how high (pitch) and how loud each original line is.
  * Used to pick a boy or girl Khmer voice per line and to shape it like the original speaker.
  */
-import fs from "node:fs";
 
 export type Gender = "male" | "female";
 export type VoiceInfo = { f0: number; db: number; gender?: Gender };
@@ -139,4 +138,5 @@ export function analyzeLines(wav: string, lines: { start: number; end: number }[
     infos[i].gender = prev ?? majority;
   }
   return infos.map(({ f0, db, gender }) => ({ f0, db, gender }));
-}
+}import { fs } from "./rt";
+

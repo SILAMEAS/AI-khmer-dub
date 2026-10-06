@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "@/lib/rt";
 import { VOICES, voicePreview, type Voice } from "@/lib/pipeline";
 import { JOBS_DIR } from "@/lib/tools";
 

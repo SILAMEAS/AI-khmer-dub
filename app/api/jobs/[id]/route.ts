@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { fs } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
 
 export const runtime = "nodejs";

@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "@/lib/rt";
 import { VOICES_DIR } from "@/lib/clone";
 import { jobDir, jobs } from "@/lib/jobs";
 

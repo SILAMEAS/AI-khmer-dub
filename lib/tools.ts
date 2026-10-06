@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "./rt";
 
 export const ROOT = process.cwd();
 export const BIN = path.join(ROOT, "bin");

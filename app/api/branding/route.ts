@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { fs } from "@/lib/rt";
 import { DEFAULT_LOGO, DEFAULT_SUB, listFonts, logoFile } from "@/lib/branding";
 
 export const runtime = "nodejs";

@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "./rt";
 import { dub, prepare, render, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 

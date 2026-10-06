@@ -2,8 +2,7 @@
  * Video look: subtitle style (font, colours, box, position) and a logo that slides across the picture.
  * Uploaded fonts and the logo live in ./branding and are reused for every video.
  */
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "./rt";
 import { ROOT } from "./tools";
 
 export const BRANDING_DIR = path.join(ROOT, "branding");

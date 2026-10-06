@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { fs, path } from "@/lib/rt";
 import { FONTS_DIR } from "@/lib/branding";
 
 export const runtime = "nodejs";

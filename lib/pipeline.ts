@@ -3,12 +3,10 @@
  * Audio is streamed through ffmpeg in chunks, so a 2-hour movie needs little RAM.
  */
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
 import { Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fs, fsp, path } from "./rt";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
 import { analyzeLines, median } from "./voice";

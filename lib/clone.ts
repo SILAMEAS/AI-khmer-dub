@@ -2,9 +2,7 @@
  * Bridge to the Python voice-cloning worker (scripts/voice_clone.py), installed by: npm run setup -- --clone
  * Separates voices from music, finds who speaks each line, and re-speaks the Khmer lines in those voices.
  */
-import fs from "node:fs";
-import fsp from "node:fs/promises";
-import path from "node:path";
+import { fs, fsp, path } from "./rt";
 import { ROOT, run, tool } from "./tools";
 
 const PY_DIR = path.join(ROOT, "py");
