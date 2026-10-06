@@ -4,8 +4,8 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { jobDir, jobs, startJob, type Job } from "@/lib/jobs";
-import { parseLogo, parseSubStyle } from "@/lib/branding";
-import { defaultVoice, voiceError, type Opts } from "@/lib/pipeline";
+import { parseFx, parseLogo, parseOut, parseSubStyle } from "@/lib/branding";
+import { defaultVoice, parseMix, parseTrim, voiceError, type Opts } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +32,8 @@ export async function POST(req: Request) {
   const voice = (p.voice || defaultVoice()) as Opts["voice"];
   const voiceErr = voiceError(voice);
   if (voiceErr) return bad(voiceErr);
+  let trim: Opts["trim"];
+  try { trim = parseTrim(obj(p.trim)); } catch (e) { return bad((e as Error).message); }
   const opts: Opts = {
     url: isJson ? String(p.url || "").trim() : "",
     sourceLang: (["zh", "en"].includes(p.sourceLang) ? p.sourceLang : "auto") as Opts["sourceLang"],
@@ -44,6 +46,10 @@ export async function POST(req: Request) {
     review: String(p.review) !== "false",
     sub: parseSubStyle(obj(p.sub)),
     logo: parseLogo(obj(p.logo)),
+    out: parseOut(obj(p.out)),
+    fx: parseFx(obj(p.fx)),
+    mix: parseMix(obj(p.mix)),
+    ...(trim && { trim }),
   };
 
   const id = randomUUID().slice(0, 10);

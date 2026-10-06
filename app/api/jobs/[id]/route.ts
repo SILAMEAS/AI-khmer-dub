@@ -1,13 +1,18 @@
-import { fs } from "@/lib/rt";
+import { fs, path } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
+/** The job, plus which tracks the editor's live preview can play. */
 export async function GET(_req: Request, { params }: Ctx) {
   const job = jobs.get((await params).id);
-  return job ? Response.json(job) : Response.json({ detail: "Job not found" }, { status: 404 });
+  if (!job) return Response.json({ detail: "Job not found" }, { status: 404 });
+  const has = (f: string) => fs.existsSync(path.join(jobDir(job.id), f));
+  return Response.json({ ...job, tracks: {
+    voice: has("voice_track.m4a"), vocals: has("vocals.wav") && has("background.wav"), output: has("output.mp4"),
+  } });
 }
 
 export async function DELETE(_req: Request, { params }: Ctx) {
@@ -17,7 +22,12 @@ export async function DELETE(_req: Request, { params }: Ctx) {
   if (job.status === "queued" || job.status === "running") {
     return Response.json({ detail: "Job is still running" }, { status: 409 });
   }
+  try { // files first: if one is in use (open in a player or Explorer) the job stays listed
+    fs.rmSync(jobDir(id), { recursive: true, force: true, maxRetries: 3 });
+  } catch {
+    return Response.json({ detail: "Some files of this job are in use - close them (video player, Explorer) and try again" },
+      { status: 409 });
+  }
   jobs.delete(id);
-  fs.rmSync(jobDir(id), { recursive: true, force: true });
   return Response.json({ ok: true });
 }

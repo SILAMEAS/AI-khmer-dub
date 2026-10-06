@@ -15,12 +15,14 @@ export type SubStyle = {
   color: string; outline: string; outlineWidth: number;
   box: boolean; boxColor: string; boxOpacity: number;
   position: "bottom" | "top"; margin: number;
+  bilingual: boolean; // the original line in smaller letters under the Khmer one
+  anim: "none" | "fade" | "pop"; // how each line appears
 };
 export const DEFAULT_SUB: SubStyle = {
   font: "Khmer UI", size: 20, bold: false,
   color: "#ffffff", outline: "#000000", outlineWidth: 2,
   box: false, boxColor: "#000000", boxOpacity: 0.6,
-  position: "bottom", margin: 28,
+  position: "bottom", margin: 28, bilingual: false, anim: "none",
 };
 
 /** The logo slides across the picture for `duration` seconds, once every `every` seconds. */
@@ -29,6 +31,21 @@ export type LogoOpts = {
   position: "top" | "bottom"; opacity: number;
 };
 export const DEFAULT_LOGO: LogoOpts = { enabled: false, size: 12, every: 60, duration: 10, position: "top", opacity: 0.9 };
+
+/**
+ * Export format. aspect: picture shape (9:16 for TikTok / Reels / Shorts, 1:1 for Facebook / Instagram posts);
+ * fit: how a picture of another shape fills it; size: the short side in pixels (0 = as the source);
+ * quality: x264 CRF preset.
+ */
+export type OutOpts = {
+  aspect: "original" | "16:9" | "9:16" | "1:1" | "4:5";
+  fit: "blur" | "crop" | "bars";
+  size: 0 | 480 | 720 | 1080;
+  quality: "high" | "standard" | "small";
+};
+export const DEFAULT_OUT: OutOpts = { aspect: "original", fit: "blur", size: 0, quality: "standard" };
+export const CRF: Record<OutOpts["quality"], number> = { high: 18, standard: 21, small: 26 };
+const ASPECTS: Record<Exclude<OutOpts["aspect"], "original">, number> = { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1, "4:5": 4 / 5 };
 
 const clamp = (v: unknown, lo: number, hi: number, d: number) =>
   Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Number(v))) : d;
@@ -46,7 +63,88 @@ export function parseSubStyle(v: unknown): SubStyle {
     color: hex(s.color, d.color), outline: hex(s.outline, d.outline), outlineWidth: clamp(s.outlineWidth, 0, 6, d.outlineWidth),
     box: s.box === true, boxColor: hex(s.boxColor, d.boxColor), boxOpacity: clamp(s.boxOpacity, 0, 1, d.boxOpacity),
     position: s.position === "top" ? "top" : "bottom", margin: clamp(s.margin, 0, 200, d.margin),
+    bilingual: s.bilingual === true,
+    anim: s.anim === "fade" || s.anim === "pop" ? s.anim : "none",
   };
+}
+
+/**
+ * Picture effects. cover: hide subtitles already burned into the source (a band from coverY, coverH high,
+ * in % of the picture height) with a blur or a solid box; filter: colour look; brightness / contrast /
+ * saturation: -100..100 (0 = unchanged); mirror: flip left-right; fade: from and to black (sound too);
+ * progress: a bar along the bottom showing how far the video is; title: text on the picture the whole time
+ * (channel name, episode), drawn with the subtitle font.
+ */
+export type FxOpts = {
+  cover: boolean; coverY: number; coverH: number; coverMode: "blur" | "box"; coverColor: string;
+  filter: "none" | "vivid" | "warm" | "cool" | "cinematic" | "vintage" | "bw";
+  brightness: number; contrast: number; saturation: number; sharpen: boolean;
+  mirror: boolean; fade: boolean; progress: boolean; progressColor: string;
+  title: string; titlePos: "tl" | "tc" | "tr" | "bl" | "br"; titleSize: number; titleColor: string;
+};
+export const DEFAULT_FX: FxOpts = {
+  cover: false, coverY: 78, coverH: 14, coverMode: "blur", coverColor: "#000000",
+  filter: "none", brightness: 0, contrast: 0, saturation: 0, sharpen: false,
+  mirror: false, fade: false, progress: false, progressColor: "#ff3b5c",
+  title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff",
+};
+const FILTERS: Record<FxOpts["filter"], string> = {
+  none: "",
+  vivid: "eq=saturation=1.35:contrast=1.06",
+  warm: "colorbalance=rs=0.08:gs=0.02:bs=-0.08:rm=0.06:bm=-0.06",
+  cool: "colorbalance=rs=-0.06:bs=0.08:rm=-0.04:bm=0.06",
+  cinematic: "eq=contrast=1.12:saturation=0.85,colorbalance=rs=-0.05:bs=0.06:rh=0.06:bh=-0.04",
+  vintage: "curves=preset=vintage",
+  bw: "hue=s=0,eq=contrast=1.1",
+};
+
+export function parseFx(v: unknown): FxOpts {
+  const s = (v && typeof v === "object" ? v : {}) as Partial<Record<keyof FxOpts, unknown>>;
+  const d = DEFAULT_FX;
+  return {
+    cover: s.cover === true, coverY: clamp(s.coverY, 0, 95, d.coverY), coverH: clamp(s.coverH, 2, 50, d.coverH),
+    coverMode: s.coverMode === "box" ? "box" : "blur", coverColor: hex(s.coverColor, d.coverColor),
+    filter: typeof s.filter === "string" && s.filter in FILTERS ? (s.filter as FxOpts["filter"]) : "none",
+    brightness: clamp(s.brightness, -100, 100, 0), contrast: clamp(s.contrast, -100, 100, 0),
+    saturation: clamp(s.saturation, -100, 100, 0), sharpen: s.sharpen === true,
+    mirror: s.mirror === true, fade: s.fade === true,
+    progress: s.progress === true, progressColor: hex(s.progressColor, d.progressColor),
+    // the title goes into an .ass file: no line breaks or override braces
+    title: typeof s.title === "string" ? s.title.replace(/[\r\n{}\\]/g, " ").trim().slice(0, 80) : "",
+    titlePos: ["tl", "tc", "tr", "bl", "br"].includes(s.titlePos as string) ? (s.titlePos as FxOpts["titlePos"]) : d.titlePos,
+    titleSize: clamp(s.titleSize, 6, 40, d.titleSize), titleColor: hex(s.titleColor, d.titleColor),
+  };
+}
+
+/** The title as an .ass subtitle file (libass shapes Khmer correctly, ffmpeg's drawtext may not). */
+export function titleAss(fx: FxOpts, font: string): string {
+  const align = { tl: 7, tc: 8, tr: 9, bl: 1, br: 3 }[fx.titlePos];
+  return ["[Script Info]", "ScriptType: v4.00+", "PlayResY: 288", "WrapStyle: 2", "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    `Style: T,${font},${fx.titleSize},${assColour(fx.titleColor)},${assColour(fx.titleColor)},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,1.5,0.8,${align},12,12,10,1`,
+    "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    `Dialogue: 0,0:00:00.00,9:59:59.00,T,,0,0,0,,${fx.title}`, ""].join("\n");
+}
+
+export function parseOut(v: unknown): OutOpts {
+  const s = (v && typeof v === "object" ? v : {}) as Partial<Record<keyof OutOpts, unknown>>;
+  const pick = <T,>(x: unknown, ok: readonly T[], d: T): T => (ok.includes(x as T) ? (x as T) : d);
+  return {
+    aspect: pick(s.aspect, ["original", "16:9", "9:16", "1:1", "4:5"] as const, DEFAULT_OUT.aspect),
+    fit: pick(s.fit, ["blur", "crop", "bars"] as const, DEFAULT_OUT.fit),
+    size: pick(Number(s.size), [0, 480, 720, 1080] as const, DEFAULT_OUT.size),
+    quality: pick(s.quality, ["high", "standard", "small"] as const, DEFAULT_OUT.quality),
+  };
+}
+
+/** Output picture size for this format (even numbers, as x264 needs). */
+export function outSize(o: OutOpts, width: number, height: number) {
+  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  const ratio = o.aspect === "original" ? width / height : ASPECTS[o.aspect];
+  // short side: the chosen size, never more than the source has (upscaling only adds blur and bytes)
+  const short = Math.min(o.size || Infinity, width, height);
+  return ratio >= 1 ? { width: even(short * ratio), height: even(short) } : { width: even(short), height: even(short / ratio) };
 }
 
 export function parseLogo(v: unknown): LogoOpts {
@@ -70,6 +168,19 @@ export function saveLogo(ext: string, data: Buffer) {
   fs.mkdirSync(BRANDING_DIR, { recursive: true });
   for (const e of LOGO_EXT) fs.rmSync(path.join(BRANDING_DIR, "logo" + e), { force: true });
   fs.writeFileSync(path.join(BRANDING_DIR, "logo" + ext), data);
+}
+
+// ---------------------------------------------------------------- background music
+
+const MUSIC_EXT = [".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"];
+export const musicFile = () =>
+  MUSIC_EXT.map((e) => path.join(BRANDING_DIR, "music" + e)).find((f) => fs.existsSync(f)) ?? null;
+
+export function saveMusic(ext: string, data: Buffer) {
+  if (!MUSIC_EXT.includes(ext)) throw new Error("The music must be an MP3, M4A, WAV, OGG or FLAC file");
+  fs.mkdirSync(BRANDING_DIR, { recursive: true });
+  for (const e of MUSIC_EXT) fs.rmSync(path.join(BRANDING_DIR, "music" + e), { force: true });
+  fs.writeFileSync(path.join(BRANDING_DIR, "music" + ext), data);
 }
 
 // ---------------------------------------------------------------- fonts
@@ -206,23 +317,76 @@ export function forceStyle(s: SubStyle): string {
  */
 export function pictureFilter(o: {
   burn: boolean; sub: SubStyle; logo: LogoOpts | null; logoInput: number; width: number; height: number; shift?: number;
+  out?: OutOpts; srt?: string; fx?: FxOpts; title?: string; duration?: number;
 }): string | null {
   const steps: string[] = [];
   let last = "0:v";
   if (o.shift) { steps.push(`[${last}]setpts=PTS+${o.shift.toFixed(3)}/TB[t]`); last = "t"; }
+  const fx = o.fx ?? DEFAULT_FX;
+  if (fx.cover) { // on the source picture, where its own subtitles are
+    const y = (fx.coverY / 100).toFixed(4), h = (Math.min(fx.coverH, 100 - fx.coverY) / 100).toFixed(4);
+    if (fx.coverMode === "blur") {
+      steps.push(`[${last}]split[c0][c1]`, `[c1]crop=iw:ih*${h}:0:ih*${y},boxblur=14:4[cb]`,
+        `[c0][cb]overlay=0:main_h*${y}[cv]`);
+    } else {
+      steps.push(`[${last}]drawbox=x=0:y=ih*${y}:w=iw:h=ih*${h}:color=${fx.coverColor.replace("#", "0x")}@1:t=fill[cv]`);
+    }
+    last = "cv";
+  }
+  const color = [
+    fx.mirror ? "hflip" : "",
+    FILTERS[fx.filter],
+    fx.brightness || fx.contrast || fx.saturation
+      ? `eq=brightness=${(fx.brightness / 400).toFixed(3)}:contrast=${(1 + fx.contrast / 200).toFixed(3)}:saturation=${(1 + fx.saturation / 100).toFixed(3)}`
+      : "",
+    fx.sharpen ? "unsharp=5:5:0.7" : "",
+  ].filter(Boolean);
+  if (color.length) { steps.push(`[${last}]${color.join(",")}[cf]`); last = "cf"; }
+  // new shape / size first, so subtitles and logo are drawn at the final resolution
+  const { width: W, height: H } = o.out ? outSize(o.out, o.width, o.height) : o;
+  if (W !== o.width || H !== o.height) {
+    const fit = o.out!.fit;
+    if (fit === "blur") { // the picture itself, enlarged and blurred, fills the empty sides
+      steps.push(`[${last}]split[fa][fb]`,
+        `[fa]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=20:5[bg]`,
+        `[fb]scale=${W}:${H}:force_original_aspect_ratio=decrease[fg]`,
+        `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[f]`);
+    } else if (fit === "crop") {
+      steps.push(`[${last}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[f]`);
+    } else {
+      steps.push(`[${last}]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1[f]`);
+    }
+    last = "f";
+  }
   if (o.burn) {
     const fontsdir = path.relative(path.join(ROOT, "jobs", "x"), FONTS_DIR).split(path.sep).join("/");
-    steps.push(`[${last}]subtitles=km.srt:fontsdir='${fontsdir}':force_style='${forceStyle(o.sub)}'[s]`);
+    steps.push(`[${last}]subtitles=${o.srt ?? "km.srt"}:fontsdir='${fontsdir}':force_style='${forceStyle(o.sub)}'[s]`);
     last = "s";
+  }
+  if (o.title) {
+    const fontsdir = path.relative(path.join(ROOT, "jobs", "x"), FONTS_DIR).split(path.sep).join("/");
+    steps.push(`[${last}]subtitles=${o.title}:fontsdir='${fontsdir}'[ti]`);
+    last = "ti";
   }
   if (o.logo?.enabled) {
     const { every: E, duration: D } = o.logo;
-    const w = Math.max(16, Math.round((o.width * o.logo.size) / 100 / 2) * 2);
+    const w = Math.max(16, Math.round((W * o.logo.size) / 100 / 2) * 2);
     const y = o.logo.position === "top" ? `H*0.05` : `H-h-H*0.05`;
     steps.push(`[${o.logoInput}:v]scale=${w}:-2,format=rgba,colorchannelmixer=aa=${o.logo.opacity.toFixed(2)}[lg]`);
     // from the left edge to past the right edge in D seconds, every E seconds; hidden in between
     steps.push(`[${last}][lg]overlay=x='-w+(W+w)*mod(t,${E})/${D}':y='${y}':enable='lt(mod(t,${E}),${D})':shortest=1[l]`);
     last = "l";
+  }
+  const dur = o.duration ?? 0;
+  if (fx.progress && dur > 0) { // grows from the left edge to the full width over the video
+    const bar = Math.max(4, Math.round(H / 160 / 2) * 2);
+    steps.push(`color=c=${fx.progressColor.replace("#", "0x")}:s=${W}x${bar}:r=25[pb]`,
+      `[${last}][pb]overlay=x='-w+w*t/${dur.toFixed(3)}':y=H-h:shortest=1[pg]`);
+    last = "pg";
+  }
+  if (fx.fade && dur > 2) {
+    steps.push(`[${last}]fade=t=in:st=0:d=0.6,fade=t=out:st=${(dur - 0.6).toFixed(3)}:d=0.6[fd]`);
+    last = "fd";
   }
   if (last === "0:v") return null;
   steps.push(`[${last}]format=yuv420p[v]`);

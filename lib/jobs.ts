@@ -1,5 +1,5 @@
 import { fs, path } from "./rt";
-import { dub, prepare, render, type Meta, type Opts } from "./pipeline";
+import { dub, prepare, remix, render, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 
 export type Job = {
@@ -14,6 +14,7 @@ export type Job = {
   title: string;
   created: number;
   version?: number;
+  exported?: number; // the version output.mp4 was made at; older than `version` when the voices changed since
   timings?: Record<string, number>; // seconds spent per stage
 };
 
@@ -68,9 +69,10 @@ async function runDub(job: Job) {
     Object.assign(job, { status: "running", error: undefined });
     save(job);
     const report = reporter(job);
-    await dub(jobDir(job.id), job.opts, job.meta!, report);
+    const warning = await dub(jobDir(job.id), job.opts, job.meta!, report);
     report("done", 1, "Done"); // closes the last stage's timing
-    Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Done", version: (job.version ?? 0) + 1 });
+    Object.assign(job, { status: "done", stage: "done", progress: 1, message: warning ?? "Ready to edit and export",
+      version: (job.version ?? 0) + 1 });
     save(job);
   } catch (e) { fail(job, e); }
 }
@@ -101,8 +103,11 @@ export function startJob(job: Job) {
   enqueue(() => runPrepare(job));
 }
 
-/** Rebuild only the video picture (new subtitle style or logo); voices and audio stay as they are. */
-export function startRender(job: Job) {
+/**
+ * Rebuild only the video picture (new subtitle style, logo or format); voices and audio stay as they are.
+ * With `sound`, the Khmer lines already made are also mixed again (new sound levels).
+ */
+export function startRender(job: Job, sound = false) {
   Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
   save(job);
   enqueue(async () => {
@@ -110,9 +115,10 @@ export function startRender(job: Job) {
       Object.assign(job, { status: "running" });
       save(job);
       const report = reporter(job);
-      await render(jobDir(job.id), job.opts, job.meta!, report);
+      await (sound ? remix : render)(jobDir(job.id), job.opts, job.meta!, report);
       report("done", 1, "Done");
-      Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Done", version: (job.version ?? 0) + 1 });
+      const version = (job.version ?? 0) + 1;
+      Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Exported", version, exported: version });
       save(job);
     } catch (e) { fail(job, e); }
   });

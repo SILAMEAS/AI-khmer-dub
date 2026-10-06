@@ -8,6 +8,14 @@ Upload a Chinese or English video (or paste a link) and get back:
 - 📝 **Khmer subtitles** as a `.srt` file and as a selectable track, optionally burned into the picture
   in your own style (any Khmer font – also your own .ttf/.otf –, size, colours, outline or box, top or bottom)
 - 🏷️ **your logo** sliding across the picture once a minute (or every 30 s … 5 min)
+- ✂️ only **part of the video** if you like (cut from … to …)
+- 📱 in the **shape for each platform**: as the source, 16:9 YouTube, 9:16 TikTok / Reels / Shorts, 1:1 or 4:5 posts,
+  at 1080p / 720p / 480p
+- 🔊 a **sound mix you control** (music level, Khmer voice level, your own background music), normalised to −14 LUFS
+  like YouTube and Facebook play
+- ✨ CapCut-style **effects**: cover the subtitles already in the video, filters (Vivid, Warm, Cool, Cinematic,
+  Vintage, Black & white), brightness / contrast / saturation, sharpen, mirror, fade in & out, a progress bar,
+  your text on the picture (channel name, episode) and animated subtitles (fade or pop)
 - 📝 the original-language `.srt`, plus the Khmer audio on its own
 
 ---
@@ -146,22 +154,44 @@ It opens **<http://127.0.0.1:5000>** for you. Translation and the Khmer AI voice
 
 ## Using it
 
-1. **Your video** – upload a file or paste a link; pick the original language (or auto detect).
-2. **Khmer voice** – 🧬 *Original voices* (default when installed), 🎭 *Auto*, 👦 *Boy* or 👧 *Girl*.
-3. **Subtitles & logo** – tick *Burn subtitles into the picture* to style them: font (all fonts on the PC that can
-   write Khmer, or **Upload font**), size, bold, text colour, outline or background box, top or bottom, distance from the edge.
-   **Upload logo** (a PNG with a transparent background looks best) and tick *Show the logo*: it slides across the
-   picture in the chosen time, once every minute (or 30 s – 5 min), near the top or the bottom, at the size and
-   see-through you set. The preview shows the result as you change it; your choices are remembered for the next video.
-4. Leave **"Let me check the translation first"** ticked: before the voices are made you can
-   - fix the Khmer text of any line,
-   - with *Original voices*: play each **Person** found in the video and change who says a line (dropdown on each line),
-   - with *Auto*: switch a line between 👦 and 👧.
-5. **Generate Khmer voice** → download the video, the Khmer `.srt`, the original `.srt` or the Khmer audio.
-   You can re-dub later with another voice or setting without recognising the speech again.
-6. **Change the look afterwards:** under the result, *Subtitle style & logo → Change*. **Preview on the video** shows
-   one real frame exactly as the video will look; **Apply** rebuilds only the picture (the voices stay) – about
-   10–40 s for 5 minutes of video.
+The editor looks like CapCut: **tools on the left**, **the video in the middle**, **settings on the right** and a
+**timeline** at the bottom. Everything you change shows **live in the player** – subtitles, text, logo, filters,
+the band over old subtitles, the shape, and the sound (levels, bass / treble, echo, music, parts). Nothing is
+merged until you press **Export**, so editing is instant.
+
+```text
+┌─ top bar: project · progress · Update voices · Export ─────────────────────────┐
+│ 📁 🗣 💬 T │ left panel       │          video player          │ right panel     │
+│ 🎨 ✨ 🎵 🏷 │ (choose)         │   ▶ 0:12 / 1:47 · shape · 📷   │ (adjust)        │
+├───────────┴─────────── timeline: cut · subtitle lines · sound parts ────────────┤
+```
+
+1. **📁 Media** – **Import video** (or drop it on the player, or paste a link), the original language, and
+   *Check the translation first*. To dub only a part, drag the white **cut handles** in the timeline (or type the
+   times on the right). Press **▶ Start dubbing**. Your projects are listed here too (✕ deletes one with its files).
+2. **🗣 Voice** – 🧬 *Original voices*, 🎭 *Auto*, 👦 *Boy* or 👧 *Girl*, speaking speed, *sound like the speaker*.
+   With original voices, play each **Person** found in the video.
+3. **💬 Captions** – every line, editable, with **Find / Replace all**. Click a line (here or in the timeline) to
+   jump to it; on the right you can play it, edit the Khmer, change who says it (or 👦 / 👧). Edited lines get a
+   yellow dot. On the right: the **subtitle style** – presets, font (or *Upload*), size, colours, outline or box,
+   top or bottom, animation (fade / pop), *Khmer + original*.
+4. **T Text** – text shown the whole time (channel name, episode), its corner, size and colour.
+5. **🎨 Filters** – Vivid, Warm, Cool, Cinematic, Vintage, B & W; brightness, contrast, saturation, sharpen.
+6. **✨ Effects** – **hide the original subtitles** (a blurred or solid band: move it over the old text while
+   watching), mirror, fade in & out, progress bar.
+7. **🎵 Audio** – keep or remove the original sound; *Separate voices from music* (gives the original voices their
+   own level and sound – done once per video); music level between lines and while someone speaks; **your own
+   background music**; the Khmer voice's volume, bass, treble and echo; **volume for parts** of the video
+   (shown in the timeline). Only *pitch* is heard after the voices are updated or the video is exported.
+8. **🏷 Logo** – upload it once; it slides across the picture every 30 s – 5 min.
+9. **⬆ Export** – shape (16:9, 9:16 TikTok, 1:1, 4:5), how the empty space is filled, resolution, quality. **Export**
+   merges everything into one MP4 and lists the downloads: the video, Khmer `.srt`, Khmer + original `.srt`,
+   original `.srt`, Khmer audio. *Exported* in the player shows the finished file; 📷 renders one exact frame.
+
+**🗣 Update voices** appears when you edited a line or changed the voice: only the changed lines are made again
+(seconds, not minutes). Export does this by itself first if needed.
+
+You can open a project at a tool and a moment with a link: `http://127.0.0.1:5000/?job=<id>&tab=captions&t=1:30`.
 
 ### How long it takes
 
@@ -171,7 +201,9 @@ Without an NVIDIA graphics card everything runs on the processor. On a 12-core P
 |---|---|
 | 🎭 Auto / 👦 Boy / 👧 Girl | ~1 minute for a 5-minute video (speech recognition alone takes ~40–60 s of that) |
 | 🧬 Original voices | ~5 s per spoken line: a 5-minute video ~8–10 minutes |
-| Burned-in subtitles / logo | + 10–40 s for a 5-minute video (the picture has to be encoded again) |
+| Editing (subtitles, logo, effects, sound) | instant – shown live in the player |
+| Update voices after editing lines | a few seconds: only the edited lines |
+| Export | measured ~35 s for a 1:47 video with burned-in subtitles (the picture is encoded again); faster when nothing on the picture changes |
 
 Times vary by ±30% from run to run on the same PC, and grow when anything else uses the processor
 (for example two dubbing jobs at once).
@@ -199,7 +231,7 @@ Start with a short clip to try it.
 
 | Folder | Contents | In git? |
 |---|---|---|
-| `app/` | web page (`page.tsx`, `LookEditor.tsx`) and API routes (`api/*`) | yes |
+| `app/` | the editor (`page.tsx`; `editor/`: `Player.tsx` live preview, `Timeline.tsx`, `look.tsx` picture settings, `sound.tsx` sound settings and live sound, `common.ts`) and API routes (`api/*`) | yes |
 | `lib/` | `pipeline.ts` (all processing steps), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
 | `branding/` | your logo and uploaded fonts, used for every video | no |
 | `scripts/` | `setup.mjs` (installer), `voice_clone.py` (separation, speakers, cloning) | yes |
