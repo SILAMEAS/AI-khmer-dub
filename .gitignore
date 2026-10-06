@@ -6,3 +6,4 @@ jobs/*
 !jobs/_preview/
 py/
 __pycache__/
+.setup-done.json

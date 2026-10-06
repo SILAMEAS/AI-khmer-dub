@@ -1,7 +1,60 @@
-# Starts Khmer AI Dubber at http://127.0.0.1:5000 (builds first if needed)
+# Khmer AI Dubber: installs whatever is missing, then starts the app at http://127.0.0.1:5000
+# Use start.cmd (it runs this script even where PowerShell scripts are blocked).
 Set-Location $PSScriptRoot
-if (-not (Test-Path node_modules)) { npm install }
-if (-not (Test-Path bin\whisper)) { npm run setup }
-if (-not (Test-Path .next\BUILD_ID)) { npm run build }
-Start-Process "http://127.0.0.1:5000"
+
+function Stop-WithMessage($msg) {
+  Write-Host "`n$msg" -ForegroundColor Red
+  exit 1
+}
+
+function Update-PathFromSystem {
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+              [Environment]::GetEnvironmentVariable("Path", "User")
+}
+
+# 1. Node.js
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Stop-WithMessage "Node.js is needed. Install the LTS version from https://nodejs.org, then run start.cmd again."
+  }
+  Write-Host "Installing Node.js LTS (a Windows prompt may appear)..."
+  winget install -e --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements
+  Update-PathFromSystem
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Stop-WithMessage "Node.js was installed. Close this window and run start.cmd again."
+  }
+}
+
+# 2. Setup: the first time, and again when the installer or the packages changed (e.g. after git pull).
+#    npm run setup writes .setup-done.json with the same fingerprint when it finishes.
+$marker = ".setup-done.json"
+$fingerprint = (Get-FileHash scripts\setup.mjs, package-lock.json -Algorithm SHA256 | ForEach-Object { $_.Hash }) -join ""
+$done = $null
+if (Test-Path $marker) { $done = Get-Content $marker -Raw | ConvertFrom-Json }
+if (-not $done -or $done.fingerprint -ne $fingerprint) {
+  $setupArgs = @()
+  if ($done -and $done.args) { $setupArgs = @($done.args) }  # keep earlier choices such as --no-clone
+  Write-Host "Setting up (the first time this downloads ~9 GB and takes 15-30 minutes)...`n"
+  npm run setup -- @setupArgs
+  if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Setup did not finish - see the message above, then run start.cmd again." }
+}
+
+# 3. Build when the code changed since the last build
+$build = ".next\BUILD_ID"
+$newest = Get-ChildItem app, lib, next.config.ts, package.json, tsconfig.json -Recurse -File |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not (Test-Path $build) -or $newest.LastWriteTime -gt (Get-Item $build).LastWriteTime) {
+  npm run build
+  if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Build failed - see the message above." }
+}
+
+# 4. Start (the browser opens once the server answers)
+Start-Job -ScriptBlock {
+  for ($i = 0; $i -lt 60; $i++) {
+    try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5000/api/capabilities -TimeoutSec 2 | Out-Null; break }
+    catch { Start-Sleep -Seconds 1 }
+  }
+  Start-Process "http://127.0.0.1:5000"
+} | Out-Null
+Write-Host "`nKhmer AI Dubber: http://127.0.0.1:5000   (close this window to stop it)`n"
 npm start

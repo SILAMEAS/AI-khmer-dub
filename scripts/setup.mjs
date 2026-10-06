@@ -8,8 +8,8 @@
 // Large files stay inside this folder (bin/, models/, py/), on whatever drive the project is on.
 // Missing programs (ffmpeg, Python) are installed with winget.
 import { execFileSync, execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -93,7 +93,10 @@ try {
   if (freeGb < needGb) console.warn(`  ! Only ${freeGb.toFixed(1)} GB free on ${drive} - about ${needGb} GB is needed`);
   else ok(`${freeGb.toFixed(0)} GB free on ${drive} (everything is installed inside ${root})`);
 } catch { /* statfs is not available everywhere */ }
-if (!fs.existsSync(path.join(root, "node_modules", "next"))) {
+// npm keeps a copy of the lock file in node_modules: a newer package-lock.json (git pull) means new packages
+const installed = path.join(root, "node_modules", ".package-lock.json");
+if (!fs.existsSync(path.join(root, "node_modules", "next")) || !fs.existsSync(installed)
+    || fs.statSync(path.join(root, "package-lock.json")).mtimeMs > fs.statSync(installed).mtimeMs) {
   execSync("npm install", { cwd: root, stdio: "inherit" });
 }
 ok("Node packages");
@@ -240,7 +243,13 @@ else {
   ok("built");
 }
 
+// start.ps1 runs setup again only when this fingerprint no longer matches (installer or packages changed)
+const fingerprint = ["scripts/setup.mjs", "package-lock.json"]
+  .map((f) => createHash("sha256").update(fs.readFileSync(path.join(root, f))).digest("hex").toUpperCase()).join("");
+fs.writeFileSync(path.join(root, ".setup-done.json"),
+  JSON.stringify({ fingerprint, args: args.filter((a) => a !== "--no-build"), at: new Date().toISOString() }, null, 1));
+
 console.log(`
 Setup complete.
-  Start the app:  .\\start.ps1   (or: npm start)  ->  http://127.0.0.1:5000
+  Start the app:  start.cmd   ->  http://127.0.0.1:5000
 ${wantClone ? "" : "  Voice cloning was skipped; add it later with: npm run setup\n"}`);

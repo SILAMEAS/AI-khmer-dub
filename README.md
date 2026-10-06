@@ -10,24 +10,37 @@ Upload a Chinese or English video (or paste a link) and get back:
 
 ---
 
-## Install on a new PC (Windows 10/11)
-
-You only need two things yourself:
-
-1. **Node.js 20.9 or newer** – <https://nodejs.org> (the LTS installer, default options)
-2. **This project folder** – copy it, or `git clone` it. Put it on the drive with the most free space:
-   everything the app downloads (~9 GB) is stored **inside this folder**, never on drive C:.
-
-Then open PowerShell in the project folder and run **one command**:
+## Quick start (Windows 10/11)
 
 ```powershell
-npm run setup
+git clone https://github.com/SILAMEAS/AI-khmer-dub.git
+cd AI-khmer-dub
+.\start.cmd
 ```
 
-That's it. It takes 15–30 minutes the first time (mostly downloads) and does everything below by itself.
-It is safe to run again at any time: finished steps are skipped (a second run takes ~30 s).
+**`start.cmd` is the only command you ever need** – the first time and every time after (you can also double-click it).
+It installs whatever is missing, builds the app, starts it and opens <http://127.0.0.1:5000>.
+Close its window to stop the app.
 
-### What `npm run setup` installs and configures
+- **First run:** 15–30 minutes, mostly downloads (~9 GB). Windows may ask once for permission to install Node.js, ffmpeg or Python.
+- **After that:** starts in a few seconds.
+- **After `git pull`:** it notices what changed and re-installs or rebuilds only what is needed.
+
+Clone the project onto the drive with the most free space: everything it downloads is stored
+**inside the project folder**, never on drive C:.
+
+### What `start.cmd` does
+
+1. Installs **Node.js LTS** with winget if it is not on the PC.
+2. Runs **`npm run setup`** – the first time, and again whenever `scripts/setup.mjs` or `package-lock.json` changed
+   (it remembers a fingerprint in `.setup-done.json`). Setup is the table below.
+3. Runs **`npm run build`** when the code changed since the last build.
+4. Starts the app and opens the browser.
+
+It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`) by default; `start.cmd` runs
+`start.ps1` anyway, so nothing has to be changed in Windows.
+
+### What setup installs and configures
 
 | # | Step | What happens | Where it goes | Size |
 |---|---|---|---|---|
@@ -48,6 +61,9 @@ Temporary files and download caches of the Python part also stay in the folder (
 
 ### Setup options
 
+You normally don't need these: `start.cmd` runs setup for you. To choose options, run setup yourself once –
+`start.cmd` remembers your choice (for example `--no-clone`) next time.
+
 ```powershell
 npm run setup                   # everything (recommended)
 npm run setup -- --no-clone     # without voice cloning: no Python, ~5 GB less; you get the AI voices only
@@ -61,11 +77,12 @@ npm run setup -- --no-build     # skip the build at the end
 
 | Message | What to do |
 |---|---|
-| `Node.js 20.9 or newer is needed` | install the current LTS from <https://nodejs.org>, open a new PowerShell, run setup again |
+| `Node.js 20.9 or newer is needed` | your Node.js is too old: install the current LTS from <https://nodejs.org>, then run `start.cmd` again |
 | `... is missing and winget is not available` | install that program by hand (ffmpeg: <https://www.gyan.dev/ffmpeg/builds/>, Python 3.12: <https://www.python.org>), then run setup again |
-| `... was installed but not found` | close PowerShell, open a new one, run `npm run setup` again |
-| `Only X GB free on D:\` | free some space, or move the project folder to a bigger drive and run setup there |
-| A download stopped halfway | run `npm run setup` again – it continues where it stopped |
+| `... was installed but not found` | close the window and run `start.cmd` again (Windows only sees new programs in new windows) |
+| `running scripts is disabled on this system` | you ran `start.ps1` directly – use `start.cmd` instead |
+| `Only X GB free on D:\` | free some space, or move the project folder to a bigger drive and run `start.cmd` there |
+| A download stopped halfway | run `start.cmd` again – it continues where it stopped |
 | `The Python environment is broken` | happens when the Python it was made from is uninstalled; setup rebuilds it by itself |
 
 To use a specific Python, set it before running setup: `$env:PYTHON = "D:\Python312\python.exe"; npm run setup`
@@ -75,11 +92,10 @@ To use a specific Python, set it before running setup: `$env:PYTHON = "D:\Python
 ## Start the app (every time)
 
 ```powershell
-.\start.ps1        # or: npm start
+.\start.cmd
 ```
 
-Then open **<http://127.0.0.1:5000>** (`start.ps1` opens it for you).
-Translation and the Khmer AI voices need internet.
+It opens **<http://127.0.0.1:5000>** for you. Translation and the Khmer AI voices need internet.
 
 ## Using it
 

@@ -1,0 +1,3 @@
+# Windows scripts must keep Windows line endings, even when cloned on another system
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
