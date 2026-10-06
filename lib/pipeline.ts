@@ -10,10 +10,30 @@ import path from "node:path";
 import { Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
-import { MODELS_DIR, SR, decodeMono, probeDuration, run, tool } from "./tools";
+import { MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, run, tool } from "./tools";
+import { analyzeLines, median } from "./voice";
+import { BACKGROUND, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample } from "./clone";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
 export type Voice = keyof typeof VOICES;
+/** auto: boy or girl per line; clone: each line in the original speaker's own voice (lib/clone.ts). */
+export type VoiceChoice = Voice | "auto" | "clone";
+export const defaultVoice = (): VoiceChoice => (cloneAvailable() ? "clone" : "auto");
+/** Why a requested voice can't be used, or null when it can. */
+export function voiceError(v: string): string | null {
+  if (v === "clone") return cloneAvailable() ? null : "Voice cloning is not installed - run: npm run setup -- --clone";
+  return v in VOICES || v === "auto" ? null : "voice must be clone, auto, male or female";
+}
+// Natural pitch of each Khmer voice (Hz) and how far it moves per Hz of SSML pitch offset,
+// measured from the voices themselves. Used to bring the dub close to the original speaker.
+const VOICE_PITCH: Record<Voice, { f0: number; perHz: number }> = {
+  male: { f0: 135, perHz: 0.89 },
+  female: { f0: 231, perHz: 1.57 },
+};
+const MATCH = 0.6;        // move this share of the way from the AI voice's pitch to the speaker's
+const MAX_TTS_RATE = 60;  // to fit a long line, let the voice itself talk at most this much faster (%)
+const MP3_BYTES_PER_SEC = 96000 / 8;
+const VOICE_DB = -17;     // average loudness of the dub (dBFS RMS)
 const MODELS: Record<string, string> = {
   best: "ggml-large-v3-turbo-q5_0.bin",
   balanced: "ggml-medium-q5_0.bin",
@@ -24,14 +44,22 @@ const MAX_SPEEDUP = 1.6; // never speed a Khmer line up more than this
 const GAP = 0.05;        // seconds of silence kept between dubbed lines
 export const PREVIEW_TEXT = "សួស្តី! នេះគឺជាសំឡេងបញ្ចូលភាសាខ្មែរ សម្រាប់ភាពយន្តរបស់អ្នក។";
 
-export type Segment = { start: number; end: number; text: string; km: string };
+/**
+ * f0/db: the original speaker's pitch (Hz, 0 = unclear) and loudness; voice: boy or girl for the line (editable);
+ * speaker: which person says it (0-based, voice cloning only; editable).
+ */
+export type Segment = {
+  start: number; end: number; text: string; km: string; f0?: number; db?: number; voice?: Voice; speaker?: number;
+};
 export type Report = (stage: string, frac: number, msg: string) => void;
 export type Opts = {
   url: string; inputName?: string; title?: string;
   sourceLang: "auto" | "zh" | "en"; quality: string;
-  voice: Voice; rate: number; bgMode: "duck" | "none"; burn: boolean; review: boolean;
+  voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean; review: boolean;
 };
-export type Meta = { input: string; title: string; duration: number; language: string; segments: number };
+export type Meta = {
+  input: string; title: string; duration: number; language: string; segments: number; speakers?: number;
+};
 
 // ---------------------------------------------------------------- helpers
 
@@ -118,7 +146,7 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
   const whisper = async (useVad: boolean, label: string) => {
     const args = ["-m", model, "-f", wav, "-l", lang === "auto" ? "auto" : lang,
       "-t", String(Math.min(os.cpus().length, 12)), "-mc", "0", "-bs", "5",
-      "-oj", "-of", base, "-pp"];
+      "-ojf", "-of", base, "-pp"]; // full JSON: word timings, to split a line where the speaker changes
     if (useVad) args.push("--vad", "-vm", vad, "-vsd", "400", "-vp", "200");
     if (lang === "zh") args.push("--prompt", "以下是普通话的句子。"); // nudges simplified Chinese + punctuation
     report("transcribe", 0, label);
@@ -138,22 +166,70 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
   if (hasVad && !(json.transcription ?? []).length) {
     json = await whisper(false, "No clear speech found - listening to the whole track");
   }
-  const segs: Segment[] = [];
+  const lines: RawLine[] = [];
   for (const s of json.transcription ?? []) {
-    const text = String(s.text).trim().replace(/^["“”「」『』]+|["“”「」『』]+$/g, "").trim();
+    const text = cleanText(s.text);
     // skip empty lines and sound tags like [Music] / (音乐)
     if (!text || /^[\[(（【♪].*[\])）】♪]$/.test(text)) continue;
-    const start = s.offsets.from / 1000, end = s.offsets.to / 1000;
+    const words = (s.tokens ?? []).filter((t: { text: string }) => !t.text.startsWith("[_"))
+      .map((t: { text: string; offsets: { from: number } }) => ({ text: t.text, at: t.offsets.from / 1000 }));
+    lines.push({ start: s.offsets.from / 1000, end: s.offsets.to / 1000, text, words });
+  }
+  return { lines, language: String(json.result?.language ?? lang) };
+}
+
+/** A whisper line with the start time of each word, before lines are glued into sentences. */
+type RawLine = { start: number; end: number; text: string; words: { text: string; at: number }[]; speaker?: number };
+
+const cleanText = (t: string) => String(t).trim().replace(/^["“”「」『』]+|["“”「」『』]+$/g, "").trim();
+
+/** Whisper often cuts mid-sentence: glue the pieces back (same person only) so translation and voice sound natural. */
+function glue(lines: RawLine[]): Segment[] {
+  const segs: Segment[] = [];
+  for (const l of lines) {
     const prev = segs[segs.length - 1];
-    // whisper often cuts mid-sentence: glue the pieces back so translation and voice sound natural
-    if (prev && !/[.?!。？！…]$/.test(prev.text) && start - prev.end < 0.6 && end - prev.start < 15) {
-      prev.text += (/[一-鿿]$/.test(prev.text) ? "" : " ") + text;
-      prev.end = end;
+    if (prev && prev.speaker === l.speaker && !/[.?!。？！…]$/.test(prev.text) && l.start - prev.end < 0.6
+        && l.end - prev.start < 15) {
+      prev.text += (/[一-鿿]$/.test(prev.text) ? "" : " ") + l.text;
+      prev.end = l.end;
     } else {
-      segs.push({ start, end, text, km: "" });
+      segs.push({ start: l.start, end: l.end, text: l.text, km: "", ...(l.speaker !== undefined && { speaker: l.speaker }) });
     }
   }
-  return { segs, language: String(json.result?.language ?? lang) };
+  return segs;
+}
+
+/** Cuts a whisper line in two between words, as close as possible to `at` (seconds); null if it can't. */
+function splitLine(l: RawLine, at: number): [RawLine, RawLine] | null {
+  let k = -1, best = Infinity;
+  // whisper's word pieces: " word" in spaced languages, single characters in Chinese; broken bytes are unusable
+  if (!l.words.some((w) => w.text.includes("�"))) {
+    l.words.forEach((w, i) => {
+      if (i > 0 && /^(\s|[　-鿿＀-￯])/.test(w.text) && Math.abs(w.at - at) < best) {
+        best = Math.abs(w.at - at);
+        k = i;
+      }
+    });
+  }
+  let left: string, right: string;
+  if (k > 0) {
+    left = l.words.slice(0, k).map((w) => w.text).join("");
+    right = l.words.slice(k).map((w) => w.text).join("");
+  } else { // no usable word timings: cut the text in proportion to time, at a space or punctuation nearby
+    const chars = [...l.text];
+    let i = Math.round((chars.length * (at - l.start)) / Math.max(l.end - l.start, 0.01));
+    for (let d = 0; d <= 4; d++) {
+      if (/[\s，。、,.?!？！]/.test(chars[i + d - 1] ?? "")) { i += d; break; }
+      if (/[\s，。、,.?!？！]/.test(chars[i - d - 1] ?? "")) { i -= d; break; }
+    }
+    left = chars.slice(0, i).join("");
+    right = chars.slice(i).join("");
+  }
+  if (!cleanText(left) || !cleanText(right)) return null;
+  return [
+    { start: l.start, end: at, text: cleanText(left), words: k > 0 ? l.words.slice(0, k) : [] },
+    { start: at, end: l.end, text: cleanText(right), words: k > 0 ? l.words.slice(k) : [] },
+  ];
 }
 
 // ---------------------------------------------------------------- stage 3: translate
@@ -214,6 +290,14 @@ async function translate(segs: Segment[], srcLang: string, report: Report) {
   }
 }
 
+/** Who is speaking each line: pitch and loudness of the original voice, and boy or girl for the dub. */
+function analyzeSpeakers(jd: string, segs: Segment[], report: Report) {
+  report("analyze", 0, "Listening to who speaks each line");
+  analyzeLines(path.join(jd, "audio16k.wav"), segs).forEach((v, i) => {
+    Object.assign(segs[i], { f0: Math.round(v.f0), db: Math.round(v.db * 10) / 10, voice: v.gender });
+  });
+}
+
 export async function prepare(jd: string, opts: Opts, report: Report): Promise<Meta> {
   let src: string, title = opts.title || "video";
   if (opts.url) ({ file: src, title } = await download(opts.url, jd, report));
@@ -224,19 +308,66 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
 
-  const { segs, language } = await transcribe(wav, jd, opts.sourceLang, opts.quality, report);
-  if (!segs.length) throw new Error("No speech was detected in this video");
+  const { lines, language } = await transcribe(wav, jd, opts.sourceLang, opts.quality, report);
+  if (!lines.length) throw new Error("No speech was detected in this video");
+  const meta: Meta = { input: path.basename(src), title, duration, language, segments: 0 };
+  const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
+  meta.segments = segs.length;
+  analyzeSpeakers(jd, segs, report);
   await translate(segs, language, report);
   saveSegments(jd, segs);
   writeSrt(path.join(jd, "original.srt"), segs.map((s) => [s.start, s.end, s.text]));
   writeSrt(path.join(jd, "km.srt"), segs.map((s) => [s.start, s.end, s.km]));
-  return { input: path.basename(src), title, duration, language, segments: segs.length };
+  return meta;
+}
+
+/**
+ * Voice cloning: split voices from music, find who says each line (and where another person cuts in)
+ * and keep a voice sample of each person.
+ */
+async function speakerPieces(jd: string, lines: { start: number; end: number }[], meta: Meta, report: Report) {
+  report("separate", 0, "Separating voices from music");
+  await separate(jd, path.join(jd, meta.input), meta.duration,
+    (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
+  report("analyze", 0, "Finding who speaks each line");
+  const pieces = await findSpeakers(jd, lines, (f) => report("analyze", f, "Finding who speaks each line"));
+  meta.speakers = new Set(pieces.map((p) => p.speaker)).size;
+  return pieces;
+}
+
+/** Whisper lines cut wherever another person starts talking, each with its speaker. */
+async function splitBySpeaker(jd: string, lines: RawLine[], meta: Meta, report: Report): Promise<RawLine[]> {
+  const pieces = await speakerPieces(jd, lines, meta, report);
+  const out: RawLine[] = [];
+  lines.forEach((l, n) => {
+    const mine = pieces.filter((p) => p.line === n).sort((a, b) => a.start - b.start);
+    let rest = l, speaker = mine[0]?.speaker ?? 0;
+    for (const p of mine.slice(1)) {
+      const cut = splitLine(rest, p.start);
+      if (!cut) continue; // nothing to cut between: the line stays with the first person
+      out.push({ ...cut[0], speaker });
+      [rest, speaker] = [cut[1], p.speaker];
+    }
+    out.push({ ...rest, speaker });
+  });
+  return out;
+}
+
+/** Switching an already transcribed job to cloning: each line goes to the person who says most of it. */
+async function assignSpeakers(jd: string, segs: Segment[], meta: Meta, report: Report) {
+  const pieces = await speakerPieces(jd, segs, meta, report);
+  segs.forEach((s, n) => {
+    const mine = pieces.filter((p) => p.line === n);
+    s.speaker = mine.sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]?.speaker ?? 0;
+  });
 }
 
 // ---------------------------------------------------------------- stage 4: Khmer voice
 
-async function synth(tts: MsEdgeTTS, text: string, rate: number): Promise<Buffer> {
-  const { audioStream } = tts.toStream(text, { rate: `${rate >= 0 ? "+" : ""}${rate}%` });
+const signed = (n: number, unit: string) => `${n >= 0 ? "+" : ""}${n}${unit}`;
+
+async function synth(tts: MsEdgeTTS, text: string, rate: number, pitch = 0): Promise<Buffer> {
+  const { audioStream } = tts.toStream(text, { rate: signed(rate, "%"), pitch: signed(pitch, "Hz") });
   const parts: Buffer[] = [];
   for await (const c of audioStream) parts.push(c as Buffer);
   return Buffer.concat(parts);
@@ -248,27 +379,63 @@ async function newTts(voice: Voice): Promise<MsEdgeTTS> {
   return tts;
 }
 
-async function ttsAll(segs: Segment[], voice: Voice, rate: number, dir: string, report: Report) {
+/** SSML pitch offset (Hz) that moves the AI voice part of the way toward the speaker's own pitch. */
+function pitchOffset(voice: Voice, speakerF0: number): number {
+  const { f0, perHz } = VOICE_PITCH[voice];
+  if (!speakerF0) return 0;
+  // a voice pushed far from its natural pitch sounds robotic, so stay within -20% / +25%
+  const target = Math.min(Math.max(f0 + MATCH * (speakerF0 - f0), f0 * 0.8), f0 * 1.25);
+  return Math.round((target - f0) / perHz);
+}
+
+// cloning starts from the boy or girl voice closest to the speaker; the cloned voice then sets the real pitch
+const lineVoice = (s: Segment, choice: VoiceChoice): Voice =>
+  choice === "auto" || choice === "clone" ? s.voice ?? "female" : choice;
+
+async function ttsAll(segs: Segment[], opts: Opts, duration: number, dir: string, report: Report) {
   await fsp.rm(dir, { recursive: true, force: true });
   await fsp.mkdir(dir, { recursive: true });
-  const items = segs.map((s, i) => ({ i, text: s.km.trim() })).filter((x) => x.text);
+  const items = segs.map((s, i) => ({
+    i, text: s.km.trim(), voice: lineVoice(s, opts.voice),
+    // time until the next line starts: a dub that runs longer gets sped up
+    slot: Math.max((i + 1 < segs.length ? segs[i + 1].start : duration) - s.start - GAP, 0.3),
+  })).filter((x) => x.text);
   let next = 0, done = 0;
+
   const worker = async () => {
-    let tts = await newTts(voice);
-    while (next < items.length) {
-      const { i, text } = items[next++];
-      for (let attempt = 0; attempt < 4; attempt++) {
+    const conns = new Map<Voice, MsEdgeTTS>();
+    const conn = async (v: Voice) => conns.get(v) ?? conns.set(v, await newTts(v)).get(v)!;
+    const say = async (v: Voice, text: string, rate: number, pitch: number) => {
+      for (let attempt = 0; ; attempt++) {
         try {
-          const mp3 = await synth(tts, text, rate);
-          if (mp3.length) { await fsp.writeFile(path.join(dir, `${i}.mp3`), mp3); break; }
+          const mp3 = await synth(await conn(v), text, rate, pitch);
+          if (mp3.length) return mp3;
         } catch { /* reconnect and retry below */ }
-        tts.close();
+        conns.get(v)?.close();
+        conns.delete(v);
+        if (attempt === 3) return null;
         await sleep(2000 * (attempt + 1));
-        tts = await newTts(voice);
+      }
+    };
+    while (next < items.length) {
+      const { i, text, voice, slot } = items[next++];
+      const pitch = opts.match === false || opts.voice === "clone" ? 0 : pitchOffset(voice, segs[i].f0 ?? 0);
+      const file = path.join(dir, `${i}.mp3`);
+      let mp3 = await say(voice, text, opts.rate, pitch);
+      if (mp3) {
+        await fsp.writeFile(file, mp3);
+        // Too long for its slot: ask the voice to speak faster, which sounds far more natural
+        // than speeding the audio up afterwards. Whatever is left over is stretched in placeClips.
+        const spoken = trimSilence(await decodeMono(file)).length / SR || mp3.length / MP3_BYTES_PER_SEC;
+        if (spoken > slot * 1.05 && opts.rate < MAX_TTS_RATE) {
+          const rate = Math.min(MAX_TTS_RATE, Math.ceil((1 + opts.rate / 100) * (spoken / slot) * 100 - 100));
+          mp3 = await say(voice, text, rate, pitch);
+          if (mp3) await fsp.writeFile(file, mp3);
+        }
       }
       report("tts", ++done / items.length, `Generating Khmer voice ${done}/${items.length}`);
     }
-    tts.close();
+    for (const c of conns.values()) c.close();
   };
   await Promise.all(Array.from({ length: Math.min(8, items.length) }, worker));
 }
@@ -283,11 +450,19 @@ export async function voicePreview(voice: Voice, rate: number, out: string) {
 type Clip = { i: number; pos: number; len: number; file: string }; // pos/len in samples
 
 /** Fit each Khmer clip into its slot (speeding it up if needed); saves processed clips as raw f32. */
-async function placeClips(segs: Segment[], dir: string, duration: number, report: Report): Promise<Clip[]> {
+async function placeClips(segs: Segment[], dir: string, duration: number, match: boolean, report: Report): Promise<Clip[]> {
   const clips: Clip[] = [];
   let cursor = 0;
+  // rubberband keeps the voice's tone when speeding up; atempo is the fallback on minimal ffmpeg builds
+  const stretch = (await hasFilter("rubberband"))
+    ? (f: number) => `rubberband=tempo=${f.toFixed(4)}`
+    : (f: number) => `atempo=${f.toFixed(4)}`;
+  const dbs = segs.map((s) => s.db).filter((d): d is number => d !== undefined && d > -60);
+  const refDb = median(dbs);
+  const fadeIn = Math.round(0.01 * SR), fadeOut = Math.round(0.04 * SR);
   for (let i = 0; i < segs.length; i++) {
-    const mp3 = path.join(dir, `${i}.mp3`);
+    const cloned = path.join(dir, `${i}.vc.wav`);
+    const mp3 = fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
     if (!fs.existsSync(mp3)) continue;
     let a = trimSilence(await decodeMono(mp3));
     if (!a.length) continue;
@@ -297,13 +472,20 @@ async function placeClips(segs: Segment[], dir: string, duration: number, report
     const dur = a.length / SR;
     if (dur > avail) {
       const factor = Math.min(dur / avail, MAX_SPEEDUP);
-      a = trimSilence(await decodeMono(mp3, `atempo=${factor.toFixed(4)}`));
+      a = trimSilence(await decodeMono(mp3, stretch(factor)));
     }
-    let peak = 0;
-    for (const v of a) peak = Math.max(peak, Math.abs(v));
+    // follow the original: a shout stays louder than a whisper (half the difference, at most ±6 dB)
+    const db = segs[i].db;
+    const lift = match && dbs.length && db !== undefined && db > -60 ? Math.max(-6, Math.min(6, (db - refDb) / 2)) : 0;
+    let peak = 0, energy = 0;
+    for (const v of a) { peak = Math.max(peak, Math.abs(v)); energy += v * v; }
+    const rms = Math.sqrt(energy / a.length);
+    const k = rms > 0 ? Math.min(10 ** ((VOICE_DB + lift) / 20) / rms, 0.95 / peak) : 1;
     const out = new Float32Array(a.length);
-    const k = peak > 0 ? 0.89 / peak : 1;
-    for (let j = 0; j < a.length; j++) out[j] = a[j] * k;
+    for (let j = 0; j < a.length; j++) {
+      const fade = Math.min(1, j / fadeIn, (a.length - 1 - j) / fadeOut);
+      out[j] = a[j] * k * fade;
+    }
     const file = path.join(dir, `${i}.f32`);
     await fsp.writeFile(file, Buffer.from(out.buffer));
     clips.push({ i, pos: Math.round(pos * SR), len: out.length, file });
@@ -405,17 +587,21 @@ class Mixer extends Transform {
   }
 }
 
-async function mix(jd: string, src: string, segs: Segment[], duration: number, bgMode: string, report: Report) {
-  const clips = await placeClips(segs, path.join(jd, "tts"), duration, report);
+async function mix(jd: string, src: string, segs: Segment[], duration: number, bgMode: string, match: boolean,
+                   report: Report) {
+  const clips = await placeClips(segs, path.join(jd, "tts"), duration, match, report);
   const n = Math.ceil(duration * SR);
+  // with the original voices removed (voice cloning) the music only dips a little under the dub
+  const bg = path.join(jd, BACKGROUND);
+  const clean = fs.existsSync(bg);
   const env = bgMode === "duck"
     ? duckKeypoints([...segs.map((s) => [s.start, s.end] as [number, number]),
-        ...clips.map((c) => [c.pos / SR, (c.pos + c.len) / SR] as [number, number])], 0.12, 0.8)
+        ...clips.map((c) => [c.pos / SR, (c.pos + c.len) / SR] as [number, number])], clean ? 0.5 : 0.12, 0.8)
     : null;
 
   const ffmpeg = tool("ffmpeg");
   const decArgs = bgMode === "duck"
-    ? ["-v", "error", "-i", src, "-vn", "-f", "f32le", "-ac", "2", "-ar", String(SR), "-"]
+    ? ["-v", "error", "-i", clean ? bg : src, "-vn", "-f", "f32le", "-ac", "2", "-ar", String(SR), "-"]
     : ["-v", "error", "-f", "lavfi", "-i", `anullsrc=r=${SR}:cl=stereo`, "-t", String(duration),
        "-f", "f32le", "-"];
   const dec = spawn(ffmpeg, decArgs, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
@@ -439,7 +625,8 @@ async function mux(jd: string, src: string, burn: boolean, report: Report) {
   const base = ["-y", "-v", "error", "-i", path.basename(src), "-i", "dub_audio.m4a", "-i", "km.srt",
     "-map", "0:v:0", "-map", "1:a:0", "-map", "2:0"];
   const tail = ["-c:a", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=khm",
-    "-metadata:s:a:0", "language=khm", "-movflags", "+faststart", "-shortest", "output.mp4"];
+    "-metadata:s:a:0", "language=khm", "-movflags", "+faststart", "output.mp4"];
+  // no -shortest: it also counts the subtitle track and would cut the video after the last line
   const encode = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"];
   if (burn) {
     const style = "FontName=Khmer UI,FontSize=20,Outline=2,Shadow=0,MarginV=28";
@@ -456,8 +643,24 @@ async function mux(jd: string, src: string, burn: boolean, report: Report) {
 export async function dub(jd: string, opts: Opts, meta: Meta, report: Report) {
   const segs = loadSegments(jd);
   const src = path.join(jd, meta.input);
-  await ttsAll(segs, opts.voice, opts.rate, path.join(jd, "tts"), report);
-  const clips = await mix(jd, src, segs, meta.duration, opts.bgMode, report);
+  if (segs.some((s) => !s.voice) && fs.existsSync(path.join(jd, "audio16k.wav"))) { // jobs from before analysis
+    analyzeSpeakers(jd, segs, report);
+    saveSegments(jd, segs);
+  }
+  if (opts.voice === "clone" && (segs.some((s) => s.speaker === undefined) || !fs.existsSync(speakerSample(jd, 0)))) {
+    await assignSpeakers(jd, segs, meta, report); // switched to cloning after the transcription
+    saveSegments(jd, segs);
+  }
+  const ttsDir = path.join(jd, "tts");
+  await ttsAll(segs, opts, meta.duration, ttsDir, report);
+  if (opts.voice === "clone") {
+    const items = segs.map((s, i) => ({ src: path.join(ttsDir, `${i}.mp3`), ref: speakerSample(jd, s.speaker ?? 0),
+      out: path.join(ttsDir, `${i}.vc.wav`) })).filter((x) => fs.existsSync(x.src) && fs.existsSync(x.ref));
+    report("clone", 0, `Speaking in the original voices 0/${items.length}`);
+    await convertVoices(jd, items, (f) =>
+      report("clone", f, `Speaking in the original voices ${Math.round(f * items.length)}/${items.length}`));
+  }
+  const clips = await mix(jd, src, segs, meta.duration, opts.bgMode, opts.match !== false, report);
 
   // Khmer subtitles follow the dubbed speech, held until the original line ends
   const placed = new Map<number, [number, number]>(clips.map((c) => [c.i, [c.pos / SR, (c.pos + c.len) / SR]]));

@@ -39,12 +39,12 @@ export function tool(name: "ffmpeg" | "ffprobe" | "yt-dlp" | "whisper-cli"): str
   return (cache[name] = findExe(name));
 }
 
-type RunOpts = { cwd?: string; onLine?: (line: string) => void };
+type RunOpts = { cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void };
 
 /** Run a program; resolves with stdout. Rejects with the tail of stderr on failure. */
 export function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { cwd: opts.cwd, windowsHide: true });
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, windowsHide: true });
     const out: Buffer[] = [];
     let err = "";
     let partial = "";
@@ -71,6 +71,13 @@ export async function probeDuration(file: string): Promise<number> {
   const d = parseFloat(out.toString());
   if (!Number.isFinite(d)) throw new Error("Cannot read the video duration");
   return d;
+}
+
+let filters: Promise<string> | undefined;
+/** Whether this ffmpeg build has an audio filter (builds differ, e.g. rubberband is optional). */
+export async function hasFilter(name: string): Promise<boolean> {
+  filters ??= run(tool("ffmpeg"), ["-hide_banner", "-filters"]).then((b) => b.toString(), () => "");
+  return new RegExp(`^\\s*\\S+\\s+${name}\\s`, "m").test(await filters);
 }
 
 export async function decodeMono(file: string, af?: string): Promise<Float32Array> {

@@ -35,13 +35,17 @@ input[type=text], input[type=url], select, textarea { width: 100%; padding: 10px
 textarea { resize: vertical; min-height: 44px; }
 label.f { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; font-weight: 500; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 18px; }
-.voices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.voices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
 .voice { border: 2px solid var(--line); border-radius: 12px; padding: 14px; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: .15s; background: none; color: inherit; font: inherit; text-align: left; }
 .voice .av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; flex: none; }
 .voice.boy .av { background: color-mix(in srgb, var(--boy) 18%, transparent); }
 .voice.girl .av { background: color-mix(in srgb, var(--girl) 18%, transparent); }
 .voice.boy.on { border-color: var(--boy); }
 .voice.girl.on { border-color: var(--girl); }
+.voice.auto .av { background: var(--accent-soft); }
+.voice.auto.on { border-color: var(--accent); }
+.who { border: 1px solid var(--line); border-radius: 8px; background: none; color: var(--ink); font: inherit; font-size: 12px; padding: 3px 6px; margin-top: 6px; cursor: pointer; display: block; }
+.who.boy { border-color: var(--boy); } .who.girl { border-color: var(--girl); }
 .voice small { display: block; color: var(--muted); }
 .voice .play { margin-left: auto; }
 .btn { border: 0; border-radius: 10px; padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer; background: var(--accent); color: var(--accent-ink); text-decoration: none; display: inline-block; }
@@ -74,3 +78,12 @@ video { width: 100%; border-radius: 12px; background: #000; max-height: 520px; }
 .jobs button { display: flex; width: 100%; justify-content: space-between; gap: 10px; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--ink); font: inherit; font-size: 14px; cursor: pointer; text-align: left; }
 .jobs button span:last-child { color: var(--muted); flex: none; }
 @media (max-width: 640px) { .seg { grid-template-columns: 1fr; } .voices { grid-template-columns: 1fr; } }
+.voice.clone .av { background: color-mix(in srgb, var(--ok) 18%, transparent); }
+.voice.clone.on { border-color: var(--ok); }
+.voice.off { opacity: .55; cursor: not-allowed; }
+.people { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.people small { opacity: .7; font-weight: 400; }
+select.who { width: auto; }
+.spk.s0 { border-color: #60a5fa; } .spk.s1 { border-color: #f472b6; } .spk.s2 { border-color: #34d399; }
+.spk.s3 { border-color: #fbbf24; } .spk.s4 { border-color: #a78bfa; } .spk.s5 { border-color: #fb923c; }
+.people .spk { border: 2px solid; }

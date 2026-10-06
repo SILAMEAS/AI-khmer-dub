@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { jobDir, jobs, startJob, type Job } from "@/lib/jobs";
-import { VOICES, type Opts } from "@/lib/pipeline";
+import { defaultVoice, voiceError, type Opts } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,13 +27,15 @@ export async function POST(req: Request) {
   const isJson = (req.headers.get("content-type") || "").includes("application/json");
   const p: Record<string, string> = isJson ? await req.json() : Object.fromEntries(q);
 
-  const voice = (p.voice || "female") as Opts["voice"];
-  if (!(voice in VOICES)) return bad("voice must be male or female");
+  const voice = (p.voice || defaultVoice()) as Opts["voice"];
+  const voiceErr = voiceError(voice);
+  if (voiceErr) return bad(voiceErr);
   const opts: Opts = {
     url: isJson ? String(p.url || "").trim() : "",
     sourceLang: (["zh", "en"].includes(p.sourceLang) ? p.sourceLang : "auto") as Opts["sourceLang"],
     quality: p.quality || "best",
     voice,
+    match: String(p.match) !== "false",
     rate: Math.max(-50, Math.min(50, Number(p.rate) || 0)),
     bgMode: p.bgMode === "none" ? "none" : "duck",
     burn: String(p.burn) === "true",
