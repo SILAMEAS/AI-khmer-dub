@@ -2,3 +2,5 @@ node_modules/
 .next/
 bin/
 models/
+jobs/*
+!jobs/_preview/
