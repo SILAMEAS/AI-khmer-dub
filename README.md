@@ -12,22 +12,67 @@ Upload a Chinese or English video (or paste a link) and get back:
 
 ## Quick start (Windows 10/11)
 
+### Step 1 – Get the code (once)
+
+Open **PowerShell**, go to the drive with the most free space (the app downloads ~9 GB into its own folder,
+never onto drive C:), and clone the project:
+
 ```powershell
+D:
 git clone https://github.com/SILAMEAS/AI-khmer-dub.git
 cd AI-khmer-dub
+```
+
+No git? Download the ZIP from GitHub (**Code → Download ZIP**), unzip it on drive D: and open that folder instead.
+
+### Step 2 – Run one command
+
+```powershell
 .\start.cmd
 ```
 
-**`start.cmd` is the only command you ever need** – the first time and every time after (you can also double-click it).
-It installs whatever is missing, builds the app, starts it and opens <http://127.0.0.1:5000>.
-Close its window to stop the app.
+Or **double-click `start.cmd`** in File Explorer. That's all – nothing else to install or configure by hand.
 
-- **First run:** 15–30 minutes, mostly downloads (~9 GB). Windows may ask once for permission to install Node.js, ffmpeg or Python.
-- **After that:** starts in a few seconds.
-- **After `git pull`:** it notices what changed and re-installs or rebuilds only what is needed.
+The first time, it installs everything by itself (15–30 minutes, mostly downloads):
 
-Clone the project onto the drive with the most free space: everything it downloads is stored
-**inside the project folder**, never on drive C:.
+```text
+[1/7] Checking this PC and installing Node packages
+[2/7] ffmpeg (audio and video processing)
+[3/7] Speech recognition (whisper.cpp) and video downloader (yt-dlp)
+[4/7] Speech recognition models
+[5/7] Python for voice cloning
+[6/7] Voice cloning packages and models (~5 GB, takes a while the first time)
+[7/7] Building the app
+Khmer AI Dubber: http://127.0.0.1:5000
+```
+
+If Windows asks for permission to install **Node.js**, **ffmpeg** or **Python**, click **Yes**.
+If it stops with a message, follow it (see [If something goes wrong](#if-something-goes-wrong)) and run `.\start.cmd` again –
+it continues where it stopped.
+
+### Step 3 – Use it
+
+The browser opens **<http://127.0.0.1:5000>** by itself. Upload a video, pick a voice, click **Start dubbing**.
+**Keep the `start.cmd` window open** while you use the app – closing it stops the app.
+
+### Every time after that
+
+```powershell
+cd D:\AI-khmer-dub
+.\start.cmd
+```
+
+(or double-click `start.cmd`). It starts in a few seconds.
+
+### Getting updates
+
+```powershell
+cd D:\AI-khmer-dub
+git pull
+.\start.cmd
+```
+
+`start.cmd` notices what changed and re-installs or rebuilds only what is needed.
 
 ### What `start.cmd` does
 
