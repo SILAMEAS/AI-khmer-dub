@@ -1,0 +1,648 @@
+{
+	"systeminfo": "WHISPER : VITISAI = 0 | COREML = 0 | OPENVINO = 0 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | OPENMP = 1 | REPACK = 1 | ",
+	"model": {
+		"type": "large",
+		"multilingual": true,
+		"vocab": 51866,
+		"audio": {
+			"ctx": 1500,
+			"state": 1280,
+			"head": 20,
+			"layer": 32
+		},
+		"text": {
+			"ctx": 448,
+			"state": 1280,
+			"head": 20,
+			"layer": 4
+		},
+		"mels": 128,
+		"ftype": 8
+	},
+	"params": {
+		"model": "D:\\mine\\AI\\khmer-dubber-next\\models\\ggml-large-v3-turbo-q5_0.bin",
+		"language": "auto",
+		"translate": false
+	},
+	"result": {
+		"language": "en"
+	},
+	"transcription": [
+		{
+			"timestamps": {
+				"from": "00:00:00,000",
+				"to": "00:00:10,000"
+			},
+			"offsets": {
+				"from": 0,
+				"to": 10000
+			},
+			"text": " *music*"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:10,000",
+				"to": "00:00:13,000"
+			},
+			"offsets": {
+				"from": 10000,
+				"to": 13000
+			},
+			"text": " Knew he was a killer"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:13,000",
+				"to": "00:00:14,000"
+			},
+			"offsets": {
+				"from": 13000,
+				"to": 14000
+			},
+			"text": " First time that I saw him"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:14,000",
+				"to": "00:00:17,000"
+			},
+			"offsets": {
+				"from": 14000,
+				"to": 17000
+			},
+			"text": " Wonder how many girls he had left and left haunted"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:17,000",
+				"to": "00:00:20,000"
+			},
+			"offsets": {
+				"from": 17000,
+				"to": 20000
+			},
+			"text": " But if he's a ghost then I can be a phantom"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:20,000",
+				"to": "00:00:22,000"
+			},
+			"offsets": {
+				"from": 20000,
+				"to": 22000
+			},
+			"text": " Holding him for ransom"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:22,000",
+				"to": "00:00:25,000"
+			},
+			"offsets": {
+				"from": 22000,
+				"to": 25000
+			},
+			"text": " Some, some, some boys are trying too hard"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:25,000",
+				"to": "00:00:26,000"
+			},
+			"offsets": {
+				"from": 25000,
+				"to": 26000
+			},
+			"text": " He don't try at all though"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:26,000",
+				"to": "00:00:29,000"
+			},
+			"offsets": {
+				"from": 26000,
+				"to": 29000
+			},
+			"text": " Younger than my exes but he act like such a man so"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:29,000",
+				"to": "00:00:33,760"
+			},
+			"offsets": {
+				"from": 29000,
+				"to": 33760
+			},
+			"text": " So I see nothing better, I keep him forever like a vendetta"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:33,760",
+				"to": "00:00:38,220"
+			},
+			"offsets": {
+				"from": 33760,
+				"to": 38220
+			},
+			"text": " I, I, I see how this is gonna go"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:38,220",
+				"to": "00:00:40,980"
+			},
+			"offsets": {
+				"from": 38220,
+				"to": 40980
+			},
+			"text": " Touch me and you'll never be alone"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:40,980",
+				"to": "00:00:45,720"
+			},
+			"offsets": {
+				"from": 40980,
+				"to": 45720
+			},
+			"text": " Island breeze and lights down low, no one has to know"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:45,720",
+				"to": "00:00:50,420"
+			},
+			"offsets": {
+				"from": 45720,
+				"to": 50420
+			},
+			"text": " In the middle of the night, in my dreams"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:50,420",
+				"to": "00:00:55,840"
+			},
+			"offsets": {
+				"from": 50420,
+				"to": 55840
+			},
+			"text": " You should see the things we do, baby"
+		},
+		{
+			"timestamps": {
+				"from": "00:00:55,840",
+				"to": "00:01:02,400"
+			},
+			"offsets": {
+				"from": 55840,
+				"to": 62400
+			},
+			"text": " In the middle of the night, in my dreams"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:02,400",
+				"to": "00:01:10,260"
+			},
+			"offsets": {
+				"from": 62400,
+				"to": 70260
+			},
+			"text": " I know I'm gonna be with you, so I take my time"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:10,260",
+				"to": "00:01:12,240"
+			},
+			"offsets": {
+				"from": 70260,
+				"to": 72240
+			},
+			"text": " Are you ready for it?"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:17,020",
+				"to": "00:01:20,280"
+			},
+			"offsets": {
+				"from": 77020,
+				"to": 80280
+			},
+			"text": " When I was a robber, first time that he saw me"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:20,280",
+				"to": "00:01:23,180"
+			},
+			"offsets": {
+				"from": 80280,
+				"to": 83180
+			},
+			"text": " Stealing hearts and running off and never saying sorry"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:23,180",
+				"to": "00:01:32,180"
+			},
+			"offsets": {
+				"from": 83180,
+				"to": 92180
+			},
+			"text": " But if I'm a teason, he can join the heist, and we'll move to an island, and, and he can be my jailer, burden to this tailor."
+		},
+		{
+			"timestamps": {
+				"from": "00:01:32,180",
+				"to": "00:01:35,180"
+			},
+			"offsets": {
+				"from": 92180,
+				"to": 95180
+			},
+			"text": " Every love I've known in comparison is a failure."
+		},
+		{
+			"timestamps": {
+				"from": "00:01:35,180",
+				"to": "00:01:41,180"
+			},
+			"offsets": {
+				"from": 95180,
+				"to": 101180
+			},
+			"text": " I forget their names now, I'm so very tame now, never be the same now, now."
+		},
+		{
+			"timestamps": {
+				"from": "00:01:41,180",
+				"to": "00:01:47,180"
+			},
+			"offsets": {
+				"from": 101180,
+				"to": 107180
+			},
+			"text": " I, I, I see how this is gon' go. Touch me and you'll never be alone."
+		},
+		{
+			"timestamps": {
+				"from": "00:01:47,180",
+				"to": "00:01:52,740"
+			},
+			"offsets": {
+				"from": 107180,
+				"to": 112740
+			},
+			"text": " White island breeze and lights down low No one has to know"
+		},
+		{
+			"timestamps": {
+				"from": "00:01:52,740",
+				"to": "00:02:01,920"
+			},
+			"offsets": {
+				"from": 112740,
+				"to": 121920
+			},
+			"text": " In the middle of the night, in my dreams You should see the things we do, baby"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:01,920",
+				"to": "00:02:16,320"
+			},
+			"offsets": {
+				"from": 121920,
+				"to": 136320
+			},
+			"text": " In the middle of the night, in my dreams I know I'm gonna be with you so I take my time"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:16,320",
+				"to": "00:02:18,320"
+			},
+			"offsets": {
+				"from": 136320,
+				"to": 138320
+			},
+			"text": " Are you ready for it?"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:20,400",
+				"to": "00:02:24,220"
+			},
+			"offsets": {
+				"from": 140400,
+				"to": 144220
+			},
+			"text": " Are you ready for it?"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:24,220",
+				"to": "00:02:26,040"
+			},
+			"offsets": {
+				"from": 144220,
+				"to": 146040
+			},
+			"text": " Baby, let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:26,040",
+				"to": "00:02:27,540"
+			},
+			"offsets": {
+				"from": 146040,
+				"to": 147540
+			},
+			"text": " Let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:27,540",
+				"to": "00:02:29,020"
+			},
+			"offsets": {
+				"from": 147540,
+				"to": 149020
+			},
+			"text": " Let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:29,020",
+				"to": "00:02:32,040"
+			},
+			"offsets": {
+				"from": 149020,
+				"to": 152040
+			},
+			"text": " Baby, let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:32,040",
+				"to": "00:02:33,540"
+			},
+			"offsets": {
+				"from": 152040,
+				"to": 153540
+			},
+			"text": " Let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:33,540",
+				"to": "00:02:34,960"
+			},
+			"offsets": {
+				"from": 153540,
+				"to": 154960
+			},
+			"text": " Let the kids begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:34,960",
+				"to": "00:02:38,200"
+			},
+			"offsets": {
+				"from": 154960,
+				"to": 158200
+			},
+			"text": " I, I, I see how this is gonna go"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:38,200",
+				"to": "00:02:40,960"
+			},
+			"offsets": {
+				"from": 158200,
+				"to": 160960
+			},
+			"text": " Touch me and you'll never be alone"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:40,960",
+				"to": "00:02:43,960"
+			},
+			"offsets": {
+				"from": 160960,
+				"to": 163960
+			},
+			"text": " I, island, breeze and lights down low"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:43,960",
+				"to": "00:02:45,580"
+			},
+			"offsets": {
+				"from": 163960,
+				"to": 165580
+			},
+			"text": " No one has to know"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:45,580",
+				"to": "00:02:50,240"
+			},
+			"offsets": {
+				"from": 165580,
+				"to": 170240
+			},
+			"text": " In the middle of the night"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:50,240",
+				"to": "00:02:51,940"
+			},
+			"offsets": {
+				"from": 170240,
+				"to": 171940
+			},
+			"text": " My dreams"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:51,940",
+				"to": "00:02:56,120"
+			},
+			"offsets": {
+				"from": 171940,
+				"to": 176120
+			},
+			"text": " You should see the things we do"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:56,120",
+				"to": "00:02:57,300"
+			},
+			"offsets": {
+				"from": 176120,
+				"to": 177300
+			},
+			"text": " Baby"
+		},
+		{
+			"timestamps": {
+				"from": "00:02:57,300",
+				"to": "00:03:02,400"
+			},
+			"offsets": {
+				"from": 177300,
+				"to": 182400
+			},
+			"text": " In the middle of the night"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:02,400",
+				"to": "00:03:03,600"
+			},
+			"offsets": {
+				"from": 182400,
+				"to": 183600
+			},
+			"text": " My dreams"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:03,600",
+				"to": "00:03:08,040"
+			},
+			"offsets": {
+				"from": 183600,
+				"to": 188040
+			},
+			"text": " I know I'm gonna be with you"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:08,040",
+				"to": "00:03:11,420"
+			},
+			"offsets": {
+				"from": 188040,
+				"to": 191420
+			},
+			"text": " So take my time"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:11,420",
+				"to": "00:03:14,020"
+			},
+			"offsets": {
+				"from": 191420,
+				"to": 194020
+			},
+			"text": " In the middle of the night"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:14,020",
+				"to": "00:03:15,520"
+			},
+			"offsets": {
+				"from": 194020,
+				"to": 195520
+			},
+			"text": " Let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:15,520",
+				"to": "00:03:17,060"
+			},
+			"offsets": {
+				"from": 195520,
+				"to": 197060
+			},
+			"text": " Let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:17,060",
+				"to": "00:03:18,460"
+			},
+			"offsets": {
+				"from": 197060,
+				"to": 198460
+			},
+			"text": " Let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:18,460",
+				"to": "00:03:19,700"
+			},
+			"offsets": {
+				"from": 198460,
+				"to": 199700
+			},
+			"text": " Are you ready for it?"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:19,700",
+				"to": "00:03:21,540"
+			},
+			"offsets": {
+				"from": 199700,
+				"to": 201540
+			},
+			"text": " Baby, let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:21,540",
+				"to": "00:03:23,060"
+			},
+			"offsets": {
+				"from": 201540,
+				"to": 203060
+			},
+			"text": " Let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:23,060",
+				"to": "00:03:24,520"
+			},
+			"offsets": {
+				"from": 203060,
+				"to": 204520
+			},
+			"text": " Let the games begin"
+		},
+		{
+			"timestamps": {
+				"from": "00:03:24,520",
+				"to": "00:03:25,800"
+			},
+			"offsets": {
+				"from": 204520,
+				"to": 205800
+			},
+			"text": " Are you ready for it?"
+		}
+	]
+}

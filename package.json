@@ -1,0 +1,23 @@
+{
+  "name": "khmer-dubber",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 5000"
+  },
+  "dependencies": {
+    "msedge-tts": "^2.0.9",
+    "next": "^16.3.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}

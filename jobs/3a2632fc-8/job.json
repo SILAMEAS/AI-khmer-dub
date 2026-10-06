@@ -1,0 +1,29 @@
+{
+ "id": "3a2632fc-8",
+ "status": "done",
+ "stage": "done",
+ "progress": 1,
+ "message": "Done",
+ "opts": {
+  "url": "",
+  "sourceLang": "auto",
+  "quality": "best",
+  "voice": "female",
+  "rate": 0,
+  "bgMode": "duck",
+  "burn": false,
+  "review": true,
+  "inputName": "input.mp4",
+  "title": "YTDown.com_YouTube_Media_wIft-t-MQuE_Taylor-Swift-Ready-For-It_004_360p"
+ },
+ "title": "YTDown.com_YouTube_Media_wIft-t-MQuE_Taylor-Swift-Ready-For-It_004_360p",
+ "created": 1791196799566,
+ "meta": {
+  "input": "input.mp4",
+  "title": "YTDown.com_YouTube_Media_wIft-t-MQuE_Taylor-Swift-Ready-For-It_004_360p",
+  "duration": 210.883628,
+  "language": "en",
+  "segments": 21
+ },
+ "version": 1
+}
