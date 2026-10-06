@@ -77,6 +77,7 @@ export const speakerSample = (jd: string, speaker: number) => path.join(jd, VOIC
 export async function convertVoices(jd: string, items: { src: string; ref: string; out: string }[],
                                     onProgress: (f: number) => void) {
   if (!items.length) return;
-  // 10 steps with a 6 s sample: best likeness per second of CPU in our tests (~9 s per line on a 12-core CPU)
-  await worker("convert", jd, { steps: 10, ref_seconds: 6, items }, onProgress);
+  // 8 steps, 6 s voice sample, same-person lines converted together: ~4.5 s per line on a 12-core CPU,
+  // as alike as 10 steps in our tests
+  await worker("convert", jd, { steps: 8, ref_seconds: 6, items }, onProgress);
 }

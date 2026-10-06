@@ -87,3 +87,28 @@ select.who { width: auto; }
 .spk.s0 { border-color: #60a5fa; } .spk.s1 { border-color: #f472b6; } .spk.s2 { border-color: #34d399; }
 .spk.s3 { border-color: #fbbf24; } .spk.s4 { border-color: #a78bfa; } .spk.s5 { border-color: #fb923c; }
 .people .spk { border: 2px solid; }
+
+/* subtitle style + logo editor */
+.look { display: grid; gap: 12px; }
+.look-preview { position: relative; aspect-ratio: 16 / 9; width: 100%; max-width: 560px; border-radius: 12px; overflow: hidden;
+  background: linear-gradient(135deg, #1e293b, #334155 55%, #0f172a); }
+.look-sub { position: absolute; left: 4%; right: 4%; text-align: center; }
+.look-sub span { display: inline-block; white-space: pre-wrap; }
+.look-logo { position: absolute; left: 0; height: auto; animation: look-slide linear infinite; }
+@keyframes look-slide { from { left: 0; transform: translateX(-100%); } to { left: 100%; transform: translateX(0); } }
+@media (prefers-reduced-motion: reduce) { .look-logo { animation: none; left: 4%; } }
+.look-tag { position: absolute; top: 8px; right: 10px; color: rgba(255,255,255,.6); font-size: 11px; }
+.look-group { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px 14px; margin: 0; min-width: 0; }
+.look-group legend { padding: 0 6px; font-weight: 600; font-size: 14px; }
+.look-group:disabled { opacity: .55; }
+.look-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px 16px; }
+.look-grid > label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.look-grid[aria-disabled="true"] { opacity: .55; }
+.look-grid input[type="range"] { width: 100%; }
+.look input[type="color"] { width: 44px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
+.look-thumb { height: 40px; max-width: 160px; object-fit: contain; border-radius: 6px; background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 12px 12px; }
+.look-frame { width: 100%; border-radius: 12px; }
+.row.nowrap { flex-wrap: nowrap; }
+.look .btn.sm { white-space: nowrap; }
+.look-grid select { min-width: 0; }
+.check.inline { margin: 0; }

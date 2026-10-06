@@ -1,3 +1,4 @@
+import { parseLogo, parseSubStyle } from "@/lib/branding";
 import { jobDir, jobs, startDub } from "@/lib/jobs";
 import { loadSegments, saveSegments, voiceError, VOICES, type Opts, type Voice } from "@/lib/pipeline";
 
@@ -5,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Body = {
-  voice?: string; match?: boolean; rate?: number; bgMode?: string; burn?: boolean;
+  voice?: string; match?: boolean; rate?: number; bgMode?: string; burn?: boolean; sub?: unknown; logo?: unknown;
   segments?: { i: number; km: string; voice?: string; speaker?: number }[];
 };
 
@@ -27,6 +28,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (typeof b.rate === "number") job.opts.rate = Math.max(-50, Math.min(50, b.rate));
   if (b.bgMode) job.opts.bgMode = b.bgMode === "none" ? "none" : "duck";
   if (typeof b.burn === "boolean") job.opts.burn = b.burn;
+  if (b.sub) job.opts.sub = parseSubStyle(b.sub);
+  if (b.logo) job.opts.logo = parseLogo(b.logo);
   if (b.segments?.length) {
     const segs = loadSegments(jobDir(job.id));
     for (const e of b.segments) {

@@ -160,48 +160,96 @@ def change_points(campplus, x: np.ndarray, sr: int, depth: int = 0) -> list:
             + [cut + c for c in change_points(campplus, x[cut:], sr, depth + 1)])
 
 
-def cmd_speakers(req):
-    from scipy.cluster.hierarchy import fcluster, linkage
-
+def listen(req):
+    """Every line cut where the speaker changes ("pieces"), with its audio and voice print."""
     snd = sf.SoundFile(req["vocals"])
     sr = snd.samplerate
     campplus = load_campplus()
-    # pieces: subtitle lines, split where the speaker changes; each piece gets one speaker
-    lines, clips, emb = [], [], []
+    lines, clips, emb, pitches = [], [], [], []
     for n, ln in enumerate(req["lines"]):
         a = max(0, int(ln["start"] * sr))
         snd.seek(a)
         x = snd.read(max(0, int((ln["end"] - ln["start"]) * sr)), dtype="float32", always_2d=False)
-        cuts = [0] + change_points(campplus, x, sr) + [len(x)]
+        # voice prints work at 16 kHz: convert the line once, not every window
+        x16 = torchaudio.functional.resample(torch.from_numpy(np.ascontiguousarray(x))[None], sr, 16000)[0].numpy()
+        cuts = [0] + [round(c * sr / 16000) for c in change_points(campplus, x16, 16000)] + [len(x)]
         for s, e in zip(cuts, cuts[1:]):
             part = trim(x[s:e], sr)
+            part16 = trim(x16[round(s * 16000 / sr): round(e * 16000 / sr)], 16000)
             # whisper's line edges often hold the last word of the person before: judge the voice by the middle
-            if len(part) >= sr * 2:
-                part = part[int(sr * 0.4): -int(sr * 0.4)]
+            if len(part16) >= 16000 * 2:
+                part16 = part16[6400:-6400]
             lines.append({"line": n, "start": (a + s) / sr, "end": (a + e) / sr})
             clips.append(part)
             # under a quarter second there is nothing to go on
-            emb.append(voice_print(campplus, part, sr) if len(part) >= sr * 0.25 else None)
+            emb.append(voice_print(campplus, part16, 16000) if len(part16) >= 4000 else None)
+            pitches.append(pitch(part16) if len(part16) >= 4000 else 0.0)
         if n % 20 == 0 or n == len(req["lines"]) - 1:
             log(f"PROGRESS {n + 1} {len(req['lines'])}")
+    return lines, clips, emb, pitches, sr
+
+
+def pitch(x16: np.ndarray) -> float:
+    """Typical speaking pitch (Hz) of a 16 kHz clip; 0 if unclear."""
+    import librosa
+    f0 = librosa.yin(x16, fmin=65, fmax=420, sr=16000, frame_length=1024, hop_length=256)
+    rms = librosa.feature.rms(y=x16, frame_length=1024, hop_length=256)[0][: len(f0)]
+    voiced = f0[rms > rms.max() * 0.3] if len(rms) else f0[:0]
+    return float(np.median(voiced)) if len(voiced) >= 5 else 0.0
+
+
+def group(emb, seconds, pitches, threshold=0.65, merge=0.55):
+    """
+    Speaker number of each piece (-1: not decided yet).
+    First a strict grouping of the pieces (never mixes people, but splits one person into several groups),
+    then groups are joined when their average voices match: an average over several lines is much steadier
+    than one short line, which is what made one-by-one merging mix people up. Groups whose typical pitch
+    differs by more than 30% (a man and a woman, a child and a grandpa) are never joined.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
 
     # people are grouped on lines of 1 s or more; shorter ones ("Yes.", "Oh!") give unsteady voice prints
-    known = [i for i, e in enumerate(emb) if e is not None and len(clips[i]) >= sr]
+    known = [i for i, e in enumerate(emb) if e is not None and seconds[i] >= 1]
     if not known:
         known = [i for i, e in enumerate(emb) if e is not None]
-    spk = [-1] * len(lines)
+    spk = [-1] * len(emb)
     if len(known) == 1:
         spk[known[0]] = 0
     elif known:
         E = np.stack([emb[i] for i in known])
-        # average-linkage grouping; 0.65 kept 8 test voices (kids, adults, elders) apart without mixing anyone
-        ids = fcluster(linkage(E, method="average", metric="cosine"), t=1 - float(req.get("threshold", 0.65)),
-                       criterion="distance")
+        ids = fcluster(linkage(E, method="average", metric="cosine"), t=1 - threshold, criterion="distance")
         for i, c in zip(known, ids):
             spk[i] = int(c)
 
-    # No merging of small groups afterwards: on 1-3 s lines one person's voice prints are often no closer than two
-    # different people's, so merging mixed people up. One person split over two groups still gets their own voice.
+    def average(c):  # duration-weighted mean voice print of a group
+        members = [i for i in known if spk[i] == c]
+        v = np.sum([emb[i] * seconds[i] for i in members], axis=0)
+        return v / (np.linalg.norm(v) + 1e-8)
+
+    def typical_pitch(c):
+        p = [pitches[i] for i in known if spk[i] == c and pitches[i] > 0]
+        return float(np.median(p)) if p else 0.0
+
+    def same_range(a, b):
+        return not a or not b or max(a, b) / min(a, b) <= 1.3
+
+    while True:
+        ids = sorted({c for c in spk if c >= 0})
+        avg = {c: average(c) for c in ids}
+        f0 = {c: typical_pitch(c) for c in ids}
+        pairs = [(float(avg[a] @ avg[b]), a, b) for k, a in enumerate(ids) for b in ids[k + 1:]
+                 if same_range(f0[a], f0[b])]
+        if not pairs or max(pairs)[0] < merge:
+            return spk
+        _, a, b = max(pairs)
+        spk = [a if s == b else s for s in spk]
+
+
+def cmd_speakers(req):
+    lines, clips, emb, pitches, sr = listen(req)
+    seconds = [len(c) / sr for c in clips]
+    spk = group(emb, seconds, pitches, float(req.get("threshold", 0.65)), float(req.get("merge", 0.55)))
+    known = [i for i, s in enumerate(spk) if s >= 0]
 
     # short lines: the person whose voice is closest. In a dialogue the neighbouring line is usually the
     # other person, so this beats copying the neighbour.
@@ -312,9 +360,9 @@ class SeedVC:
         return self.refs[key]
 
     @torch.no_grad()
-    def convert(self, src: str, ref_path: str, out: str, steps: int, ref_seconds: float):
+    def convert(self, wave: torch.Tensor, ref_path: str, steps: int, ref_seconds: float) -> np.ndarray:
+        """Re-speaks `wave` (1 x n samples at VC_SR, up to BATCH_SECONDS) in the voice of the sample at ref_path."""
         ref = self.reference(ref_path, ref_seconds)
-        wave = self.load(src)[:, : VC_SR * 25]  # whisper context limit; dubbed lines are far shorter
         mel = self.to_mel(wave)
         cond, *_ = self.model.length_regulator(self.semantic(torchaudio.functional.resample(wave, VC_SR, 16000)),
                                                ylens=torch.LongTensor([mel.size(2)]), n_quantizers=3, f0=None)
@@ -322,17 +370,54 @@ class SeedVC:
         # guidance (cfg) off: half the work on CPU, same likeness in our tests
         target = self.model.cfm.inference(cat, torch.LongTensor([cat.size(1)]), ref["mel2"], ref["style"], None,
                                           steps, inference_cfg_rate=0.0)
-        y = self.vocoder(target[:, :, ref["mel2"].size(-1):].float()).squeeze().numpy()
-        sf.write(out, y, VC_SR, subtype="FLOAT")
+        return self.vocoder(target[:, :, ref["mel2"].size(-1):].float()).squeeze().numpy()
+
+
+BATCH_SECONDS = 20  # with the 6 s voice sample this stays inside the model's 30 s window
+BATCH_GAP = 0.3     # silence between lines in a batch
 
 
 def cmd_convert(req):
+    """
+    Lines of the same person are converted together, up to 20 s at a time. Each pass has a fixed cost
+    (the voice sample and the content encoder's 30 s window), which one line at a time paid for every line.
+    The model keeps timing 1:1, so every line is cut out of the result where it was put in.
+    """
     vc = SeedVC()
-    items = req["items"]
+    items, steps, ref_s = req["items"], int(req.get("steps", 10)), float(req.get("ref_seconds", 6))
     log(f"PROGRESS 0 {len(items)}")
+    by_ref = {}
     for i, it in enumerate(items):
-        vc.convert(it["src"], it["ref"], it["out"], int(req.get("steps", 10)), float(req.get("ref_seconds", 6)))
-        log(f"PROGRESS {i + 1} {len(items)}")
+        by_ref.setdefault(it["ref"], []).append(i)
+    gap = torch.zeros(1, int(VC_SR * BATCH_GAP))
+    done = 0
+
+    def run(ref, batch):
+        nonlocal done
+        parts, spans, at = [], [], 0
+        for i, w in batch:
+            parts += [w, gap]
+            spans.append((i, at, at + w.size(-1)))
+            at += w.size(-1) + gap.size(-1)
+        x = torch.cat(parts, dim=1)
+        y = vc.convert(x, ref, steps, ref_s)
+        scale = len(y) / x.size(-1)
+        for i, a, b in spans:
+            sf.write(items[i]["out"], y[int(a * scale): int(b * scale)], VC_SR, subtype="FLOAT")
+        done += len(batch)
+        log(f"PROGRESS {done} {len(items)}")
+
+    for ref, idx in by_ref.items():
+        batch, length = [], 0
+        for i in idx:
+            w = vc.load(items[i]["src"])[:, : VC_SR * BATCH_SECONDS]
+            if batch and length + w.size(-1) > VC_SR * BATCH_SECONDS:
+                run(ref, batch)
+                batch, length = [], 0
+            batch.append((i, w))
+            length += w.size(-1) + gap.size(-1)
+        if batch:
+            run(ref, batch)
     return {"done": len(items)}
 
 

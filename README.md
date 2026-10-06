@@ -6,6 +6,8 @@ Upload a Chinese or English video (or paste a link) and get back:
   - 🧬 **in each person's own voice** (voice cloning: a child stays a child, grandma stays grandma), or
   - with a **Khmer AI voice**: 🎭 auto (boy or girl per line, like the original speaker), 👦 boy (Piseth) or 👧 girl (Sreymom)
 - 📝 **Khmer subtitles** as a `.srt` file and as a selectable track, optionally burned into the picture
+  in your own style (any Khmer font – also your own .ttf/.otf –, size, colours, outline or box, top or bottom)
+- 🏷️ **your logo** sliding across the picture once a minute (or every 30 s … 5 min)
 - 📝 the original-language `.srt`, plus the Khmer audio on its own
 
 ---
@@ -146,12 +148,20 @@ It opens **<http://127.0.0.1:5000>** for you. Translation and the Khmer AI voice
 
 1. **Your video** – upload a file or paste a link; pick the original language (or auto detect).
 2. **Khmer voice** – 🧬 *Original voices* (default when installed), 🎭 *Auto*, 👦 *Boy* or 👧 *Girl*.
-3. Leave **"Let me check the translation first"** ticked: before the voices are made you can
+3. **Subtitles & logo** – tick *Burn subtitles into the picture* to style them: font (all fonts on the PC that can
+   write Khmer, or **Upload font**), size, bold, text colour, outline or background box, top or bottom, distance from the edge.
+   **Upload logo** (a PNG with a transparent background looks best) and tick *Show the logo*: it slides across the
+   picture in the chosen time, once every minute (or 30 s – 5 min), near the top or the bottom, at the size and
+   see-through you set. The preview shows the result as you change it; your choices are remembered for the next video.
+4. Leave **"Let me check the translation first"** ticked: before the voices are made you can
    - fix the Khmer text of any line,
    - with *Original voices*: play each **Person** found in the video and change who says a line (dropdown on each line),
    - with *Auto*: switch a line between 👦 and 👧.
-4. **Generate Khmer voice** → download the video, the Khmer `.srt`, the original `.srt` or the Khmer audio.
+5. **Generate Khmer voice** → download the video, the Khmer `.srt`, the original `.srt` or the Khmer audio.
    You can re-dub later with another voice or setting without recognising the speech again.
+6. **Change the look afterwards:** under the result, *Subtitle style & logo → Change*. **Preview on the video** shows
+   one real frame exactly as the video will look; **Apply** rebuilds only the picture (the voices stay) – about
+   10–40 s for 5 minutes of video.
 
 ### How long it takes
 
@@ -159,8 +169,13 @@ Without an NVIDIA graphics card everything runs on the processor. On a 12-core P
 
 | Voice | Speed |
 |---|---|
-| 🎭 Auto / 👦 Boy / 👧 Girl | a few minutes for a 20-minute video |
-| 🧬 Original voices | ~10–25 s per spoken line: a 2-minute clip ~10 min, a 20-minute video ~1–2 hours |
+| 🎭 Auto / 👦 Boy / 👧 Girl | ~1 minute for a 5-minute video (speech recognition alone takes ~40–60 s of that) |
+| 🧬 Original voices | ~5 s per spoken line: a 5-minute video ~8–10 minutes |
+| Burned-in subtitles / logo | + 10–40 s for a 5-minute video (the picture has to be encoded again) |
+
+Times vary by ±30% from run to run on the same PC, and grow when anything else uses the processor
+(for example two dubbing jobs at once).
+A 5-minute video in 20 seconds would need a fast NVIDIA graphics card – and even then only for the AI voices.
 
 Start with a short clip to try it.
 
@@ -184,8 +199,9 @@ Start with a short clip to try it.
 
 | Folder | Contents | In git? |
 |---|---|---|
-| `app/` | web page (`page.tsx`) and API routes (`api/*`) | yes |
-| `lib/` | `pipeline.ts` (all processing steps), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `tools.ts` | yes |
+| `app/` | web page (`page.tsx`, `LookEditor.tsx`) and API routes (`api/*`) | yes |
+| `lib/` | `pipeline.ts` (all processing steps), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
+| `branding/` | your logo and uploaded fonts, used for every video | no |
 | `scripts/` | `setup.mjs` (installer), `voice_clone.py` (separation, speakers, cloning) | yes |
 | `bin/`, `models/`, `py/` | downloaded programs, models and the Python environment – made by `npm run setup` | no |
 | `jobs/<id>/` | one folder per video you dub (input, subtitles, voices, output) – delete old ones to free space | no |

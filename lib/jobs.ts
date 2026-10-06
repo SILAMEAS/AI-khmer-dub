@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { dub, prepare, type Meta, type Opts } from "./pipeline";
+import { dub, prepare, render, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 
 export type Job = {
@@ -15,6 +15,7 @@ export type Job = {
   title: string;
   created: number;
   version?: number;
+  timings?: Record<string, number>; // seconds spent per stage
 };
 
 // Kept on globalThis so all route bundles (and dev hot reloads) share one queue.
@@ -44,8 +45,17 @@ export function save(job: Job) {
   fs.writeFileSync(path.join(jobDir(job.id), "job.json"), JSON.stringify(job, null, 1), "utf8");
 }
 
-const reporter = (job: Job) => (stage: string, frac: number, message: string) => {
-  Object.assign(job, { stage, progress: Math.round(frac * 1000) / 1000, message });
+/** Progress updates; also adds up how many seconds each stage took (job.timings). */
+const reporter = (job: Job) => {
+  let current = "", since = Date.now();
+  job.timings ??= {};
+  return (stage: string, frac: number, message: string) => {
+    const now = Date.now();
+    if (current) job.timings![current] = Math.round(((job.timings![current] ?? 0) + (now - since) / 1000) * 10) / 10;
+    current = stage;
+    since = now;
+    Object.assign(job, { stage, progress: Math.round(frac * 1000) / 1000, message });
+  };
 };
 
 function fail(job: Job, e: unknown) {
@@ -58,7 +68,9 @@ async function runDub(job: Job) {
   try {
     Object.assign(job, { status: "running", error: undefined });
     save(job);
-    await dub(jobDir(job.id), job.opts, job.meta!, reporter(job));
+    const report = reporter(job);
+    await dub(jobDir(job.id), job.opts, job.meta!, report);
+    report("done", 1, "Done"); // closes the last stage's timing
     Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Done", version: (job.version ?? 0) + 1 });
     save(job);
   } catch (e) { fail(job, e); }
@@ -68,7 +80,9 @@ async function runPrepare(job: Job) {
   try {
     job.status = "running";
     save(job);
-    job.meta = await prepare(jobDir(job.id), job.opts, reporter(job));
+    const report = reporter(job);
+    job.meta = await prepare(jobDir(job.id), job.opts, report);
+    report("review", 1, "");
     if (job.opts.review) {
       Object.assign(job, { status: "review", stage: "review", progress: 1,
         message: "Check the Khmer translation, then generate the voice" });
@@ -86,6 +100,23 @@ export function startJob(job: Job) {
   jobs.set(job.id, job);
   save(job);
   enqueue(() => runPrepare(job));
+}
+
+/** Rebuild only the video picture (new subtitle style or logo); voices and audio stay as they are. */
+export function startRender(job: Job) {
+  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
+  save(job);
+  enqueue(async () => {
+    try {
+      Object.assign(job, { status: "running" });
+      save(job);
+      const report = reporter(job);
+      await render(jobDir(job.id), job.opts, job.meta!, report);
+      report("done", 1, "Done");
+      Object.assign(job, { status: "done", stage: "done", progress: 1, message: "Done", version: (job.version ?? 0) + 1 });
+      save(job);
+    } catch (e) { fail(job, e); }
+  });
 }
 
 export function startDub(job: Job) {

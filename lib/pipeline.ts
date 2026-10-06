@@ -10,8 +10,9 @@ import path from "node:path";
 import { Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
-import { MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, run, tool } from "./tools";
+import { MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
 import { analyzeLines, median } from "./voice";
+import { FONTS_DIR, logoFile, parseLogo, parseSubStyle, pictureFilter, type LogoOpts, type SubStyle } from "./branding";
 import { BACKGROUND, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample } from "./clone";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
@@ -56,6 +57,7 @@ export type Opts = {
   url: string; inputName?: string; title?: string;
   sourceLang: "auto" | "zh" | "en"; quality: string;
   voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean; review: boolean;
+  sub?: SubStyle; logo?: LogoOpts; // look of the video (lib/branding.ts)
 };
 export type Meta = {
   input: string; title: string; duration: number; language: string; segments: number; speakers?: number;
@@ -133,7 +135,7 @@ async function download(url: string, jd: string, report: Report): Promise<{ file
 
 // ---------------------------------------------------------------- stage 2: speech to text
 
-async function transcribe(wav: string, jd: string, lang: string, quality: string, report: Report) {
+async function transcribe(wav: string, jd: string, lang: string, quality: string, report: Report, also = "") {
   let model = path.join(MODELS_DIR, MODELS[quality] ?? MODELS.best);
   if (!fs.existsSync(model)) {
     const any = Object.values(MODELS).map((m) => path.join(MODELS_DIR, m)).find((m) => fs.existsSync(m));
@@ -145,7 +147,7 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
 
   const whisper = async (useVad: boolean, label: string) => {
     const args = ["-m", model, "-f", wav, "-l", lang === "auto" ? "auto" : lang,
-      "-t", String(Math.min(os.cpus().length, 12)), "-mc", "0", "-bs", "5",
+      "-t", String(Math.min(os.cpus().length, 16)), "-mc", "0", "-bs", "5", // 16 threads: fastest in our tests
       "-ojf", "-of", base, "-pp"]; // full JSON: word timings, to split a line where the speaker changes
     if (useVad) args.push("--vad", "-vm", vad, "-vsd", "400", "-vp", "200");
     if (lang === "zh") args.push("--prompt", "以下是普通话的句子。"); // nudges simplified Chinese + punctuation
@@ -153,7 +155,7 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
     await run(tool("whisper-cli"), args, {
       onLine: (l) => {
         const m = l.match(/progress\s*=\s*(\d+)%/);
-        if (m) report("transcribe", +m[1] / 100, `${label} ${m[1]}%`);
+        if (m) report("transcribe", +m[1] / 100, `${label} ${m[1]}%${also}`);
       },
     });
     return JSON.parse(fs.readFileSync(base + ".json", "utf8"));
@@ -308,8 +310,17 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
 
-  const { lines, language } = await transcribe(wav, jd, opts.sourceLang, opts.quality, report);
+  // voice cloning: split voices from music at the same time as the speech is recognised (they don't depend
+  // on each other, and running both at once finishes sooner than one after the other)
+  const separating = opts.voice === "clone" ? separate(jd, src, duration, () => {}) : null;
+  separating?.catch(() => {}); // a failure is reported where it is awaited
+  const { lines, language } = await transcribe(wav, jd, opts.sourceLang, opts.quality, report,
+    separating ? " (and separating voices from music)" : "");
   if (!lines.length) throw new Error("No speech was detected in this video");
+  if (separating) {
+    report("separate", 0.9, "Separating voices from music");
+    await separating;
+  }
   const meta: Meta = { input: path.basename(src), title, duration, language, segments: 0 };
   const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
   meta.segments = segs.length;
@@ -437,7 +448,8 @@ async function ttsAll(segs: Segment[], opts: Opts, duration: number, dir: string
     }
     for (const c of conns.values()) c.close();
   };
-  await Promise.all(Array.from({ length: Math.min(8, items.length) }, worker));
+  // the voices come from Microsoft's servers: more requests at once mostly means less waiting
+  await Promise.all(Array.from({ length: Math.min(12, items.length) }, worker));
 }
 
 export async function voicePreview(voice: Voice, rate: number, out: string) {
@@ -460,20 +472,34 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
   const dbs = segs.map((s) => s.db).filter((d): d is number => d !== undefined && d > -60);
   const refDb = median(dbs);
   const fadeIn = Math.round(0.01 * SR), fadeOut = Math.round(0.04 * SR);
-  for (let i = 0; i < segs.length; i++) {
+
+  // decode every line at once (one ffmpeg per line, many in parallel), then place them in order
+  const files = segs.map((_, i) => {
     const cloned = path.join(dir, `${i}.vc.wav`);
-    const mp3 = fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
-    if (!fs.existsSync(mp3)) continue;
-    let a = trimSilence(await decodeMono(mp3));
+    return fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
+  });
+  const audio = await mapLimit(files, DECODE_JOBS, async (f) => (fs.existsSync(f) ? trimSilence(await decodeMono(f)) : null));
+  report("mix", 0.1, "Syncing Khmer voice to the video");
+  // lines that run into the next one get sped up; the expected length keeps the following lines in place
+  const plan: { i: number; factor: number }[] = [];
+  for (let i = 0, at = 0; i < segs.length; i++) {
+    const a = audio[i];
+    if (!a?.length) continue;
+    const pos = Math.max(segs[i].start, at);
+    const avail = Math.max((i + 1 < segs.length ? segs[i + 1].start : duration) - pos - GAP, 0.1);
+    const factor = a.length / SR > avail ? Math.min(a.length / SR / avail, MAX_SPEEDUP) : 1;
+    plan.push({ i, factor });
+    at = pos + a.length / SR / factor + GAP;
+  }
+  await mapLimit(plan.filter((p) => p.factor > 1), DECODE_JOBS, async (p) => {
+    audio[p.i] = trimSilence(await decodeMono(files[p.i], stretch(p.factor)));
+  });
+  report("mix", 0.25, "Syncing Khmer voice to the video");
+
+  for (const { i } of plan) {
+    const a = audio[i]!;
     if (!a.length) continue;
     const pos = Math.max(segs[i].start, cursor);
-    const nxt = i + 1 < segs.length ? segs[i + 1].start : duration;
-    const avail = Math.max(nxt - pos - GAP, 0.1);
-    const dur = a.length / SR;
-    if (dur > avail) {
-      const factor = Math.min(dur / avail, MAX_SPEEDUP);
-      a = trimSilence(await decodeMono(mp3, stretch(factor)));
-    }
     // follow the original: a shout stays louder than a whisper (half the difference, at most ±6 dB)
     const db = segs[i].db;
     const lift = match && dbs.length && db !== undefined && db > -60 ? Math.max(-6, Math.min(6, (db - refDb) / 2)) : 0;
@@ -490,9 +516,24 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
     await fsp.writeFile(file, Buffer.from(out.buffer));
     clips.push({ i, pos: Math.round(pos * SR), len: out.length, file });
     cursor = pos + out.length / SR + GAP;
-    if (i % 20 === 0) report("mix", 0.3 * (i / segs.length), "Syncing Khmer voice to the video");
   }
   return clips;
+}
+
+const DECODE_JOBS = Math.max(2, Math.min(8, os.cpus().length));
+
+/** Like Promise.all(items.map(fn)), but at most `limit` running at once. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const run = async () => {
+    while (next < items.length) {
+      const k = next++;
+      out[k] = await fn(items[k]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  return out;
 }
 
 /** Ducking envelope: original audio drops to `low` while anyone speaks, `high` elsewhere. */
@@ -607,7 +648,8 @@ async function mix(jd: string, src: string, segs: Segment[], duration: number, b
   const dec = spawn(ffmpeg, decArgs, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
   const out = path.join(jd, "dub_audio.m4a");
   const enc = spawn(ffmpeg, ["-y", "-v", "error", "-f", "f32le", "-ar", String(SR), "-ac", "2", "-i", "-",
-    "-c:a", "aac", "-b:a", "192k", out], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+    // fast AAC coder: half the encoding time, same quality within 0.2 dB in our test
+    "-c:a", "aac", "-aac_coder", "fast", "-b:a", "192k", out], { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
   let encErr = "";
   enc.stderr.on("data", (c: Buffer) => (encErr = (encErr + c).slice(-2000)));
   const encDone = new Promise<number>((r) => enc.on("close", (code) => r(code ?? 1)));
@@ -619,25 +661,51 @@ async function mix(jd: string, src: string, segs: Segment[], duration: number, b
 
 // ---------------------------------------------------------------- stage 6: final video
 
-async function mux(jd: string, src: string, burn: boolean, report: Report) {
-  report("mux", 0, burn ? "Burning subtitles into the video" : "Building final video");
+/** Picture filters (burned subtitles, sliding logo) for this job's options, plus the extra logo input. */
+async function look(jd: string, src: string, opts: Opts, shift?: number) {
+  const logo = opts.logo?.enabled ? logoFile() : null;
+  if (!opts.burn && !logo) return { inputs: [] as string[], filter: null };
+  fs.mkdirSync(FONTS_DIR, { recursive: true });
+  const filter = pictureFilter({
+    burn: opts.burn, sub: parseSubStyle(opts.sub), logo: logo ? parseLogo(opts.logo) : null,
+    logoInput: 3, ...(await probeSize(path.join(jd, path.basename(src)))), shift,
+  });
+  return { inputs: logo ? ["-loop", "1", "-i", logo] : [], filter };
+}
+
+async function mux(jd: string, src: string, opts: Opts, report: Report) {
+  const { inputs, filter } = await look(jd, src, opts);
+  report("mux", 0, filter ? "Adding subtitles and logo to the picture" : "Building final video");
   const ffmpeg = tool("ffmpeg");
-  const base = ["-y", "-v", "error", "-i", path.basename(src), "-i", "dub_audio.m4a", "-i", "km.srt",
-    "-map", "0:v:0", "-map", "1:a:0", "-map", "2:0"];
+  const base = ["-y", "-v", "error", "-i", path.basename(src), "-i", "dub_audio.m4a", "-i", "km.srt", ...inputs];
+  const streams = ["-map", "1:a:0", "-map", "2:0"];
   const tail = ["-c:a", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=khm",
     "-metadata:s:a:0", "language=khm", "-movflags", "+faststart", "output.mp4"];
   // no -shortest: it also counts the subtitle track and would cut the video after the last line
   const encode = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"];
-  if (burn) {
-    const style = "FontName=Khmer UI,FontSize=20,Outline=2,Shadow=0,MarginV=28";
-    await run(ffmpeg, [...base, "-vf", `subtitles=km.srt:force_style='${style}'`, ...encode, ...tail], { cwd: jd });
+  if (filter) {
+    await run(ffmpeg, [...base, "-filter_complex", filter, "-map", "[v]", ...streams, ...encode, ...tail], { cwd: jd });
     return;
   }
   try {
-    await run(ffmpeg, [...base, "-c:v", "copy", ...tail], { cwd: jd });
+    await run(ffmpeg, [...base, "-map", "0:v:0", ...streams, "-c:v", "copy", ...tail], { cwd: jd });
   } catch { // source codec can't go into MP4 as-is
-    await run(ffmpeg, [...base, ...encode, ...tail], { cwd: jd });
+    await run(ffmpeg, [...base, "-map", "0:v:0", ...streams, ...encode, ...tail], { cwd: jd });
   }
+}
+
+/** Only the picture changed (subtitle style, logo): rebuild the video from the existing Khmer audio. */
+export async function render(jd: string, opts: Opts, meta: Meta, report: Report) {
+  await mux(jd, path.join(jd, meta.input), opts, report);
+}
+
+/** One frame at `t` seconds with the subtitles and logo exactly as the video will show them (PNG). */
+export async function previewFrame(jd: string, opts: Opts, meta: Meta, t: number): Promise<Buffer> {
+  const src = path.join(jd, meta.input);
+  const { inputs, filter } = await look(jd, src, { ...opts, burn: true }, t);
+  return run(tool("ffmpeg"), ["-v", "error", "-ss", t.toFixed(3), "-i", path.basename(src),
+    "-f", "lavfi", "-i", "anullsrc", "-f", "lavfi", "-i", "anullsrc", ...inputs,
+    "-filter_complex", filter!, "-map", "[v]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], { cwd: jd });
 }
 
 export async function dub(jd: string, opts: Opts, meta: Meta, report: Report) {
@@ -674,5 +742,5 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report) {
     return [a, Math.min(Math.max(b, s.end, a + 1), Math.max(nxt - 0.02, b)), s.km];
   });
   writeSrt(path.join(jd, "km.srt"), items);
-  await mux(jd, src, opts.burn, report);
+  await mux(jd, src, opts, report);
 }

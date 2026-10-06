@@ -1,13 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import LookEditor, { DEFAULT_LOOK, savedLook, type Look } from "./LookEditor";
 
 type Voice = "male" | "female";
 type VoiceChoice = Voice | "auto" | "clone";
 type Job = {
   id: string; status: "queued" | "running" | "review" | "done" | "error";
   stage: string; progress: number; message: string; error?: string; title: string; version?: number;
-  opts: { url: string; voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean };
+  opts: {
+    url: string; voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean;
+    sub?: Look["sub"]; logo?: Look["logo"];
+  };
   meta?: { title: string; duration: number; language: string; segments: number; speakers?: number };
 };
 type Segment = { start: number; end: number; text: string; km: string; f0?: number; voice?: Voice; speaker?: number };
@@ -91,7 +95,8 @@ export default function Home() {
   const [voice, setVoice] = useState<VoiceChoice>("auto");
   const [match, setMatch] = useState(true);
   const [rate, setRate] = useState(0);
-  const [burn, setBurn] = useState(false);
+  const [look, setLook] = useState<Look>(DEFAULT_LOOK); // subtitle style + logo
+  useEffect(() => setLook(savedLook()), []);
   const [review, setReview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
@@ -111,7 +116,8 @@ export default function Home() {
   const [reVoice, setReVoice] = useState<VoiceChoice>("auto");
   const [reMatch, setReMatch] = useState(true);
   const [reBg, setReBg] = useState<"duck" | "none">("duck");
-  const [reBurn, setReBurn] = useState(false);
+  const [reLook, setReLook] = useState<Look>(DEFAULT_LOOK);
+  const [showLook, setShowLook] = useState(false);
 
   const loadHistory = useCallback(() => { api<Job[]>("/api/jobs").then(setHistory).catch(() => {}); }, []);
 
@@ -160,13 +166,32 @@ export default function Home() {
       if (!segs) api<Segment[]>(`/api/jobs/${job.id}/segments`).then(setSegs).catch(() => {});
     }
     if (job?.status === "done") {
-      setReVoice(job.opts.voice); setReMatch(job.opts.match !== false); setReBg(job.opts.bgMode); setReBurn(job.opts.burn);
+      setReVoice(job.opts.voice); setReMatch(job.opts.match !== false); setReBg(job.opts.bgMode);
+      setReLook({ burn: job.opts.burn, sub: { ...DEFAULT_LOOK.sub, ...job.opts.sub }, logo: { ...DEFAULT_LOOK.logo, ...job.opts.logo } });
     }
-  }, [job?.status, job?.id, showEditor, segs, job?.opts.voice, job?.opts.match, job?.opts.bgMode, job?.opts.burn]);
+  }, [job?.status, job?.id, showEditor, segs, job?.opts.voice, job?.opts.match, job?.opts.bgMode, job?.opts.burn,
+      job?.opts.sub, job?.opts.logo]);
+
+  // where the exact preview frame is taken: inside the first subtitle line
+  const [firstLine, setFirstLine] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (job?.status !== "done") return;
+    api<Segment[]>(`/api/jobs/${job.id}/segments`).then((s) => s[0] && setFirstLine(Math.floor(s[0].start + 0.5))).catch(() => {});
+  }, [job?.status, job?.id]);
+
+  async function rebuildPicture() {
+    if (!jobId) return;
+    try {
+      await api(`/api/jobs/${jobId}/render`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reLook) });
+      setShowLook(false); setPollKey((k) => k + 1);
+    } catch (e) { alert((e as Error).message); }
+  }
 
   async function start() {
     setStartErr("");
-    const params = { sourceLang, quality, voice, match: String(match), rate: String(rate), bgMode, burn: String(burn), review: String(review) };
+    const params = { sourceLang, quality, voice, match: String(match), rate: String(rate), bgMode, review: String(review),
+      burn: String(look.burn), sub: JSON.stringify(look.sub), logo: JSON.stringify(look.logo) };
     setBusy(true);
     try {
       let j: Job;
@@ -273,7 +298,7 @@ export default function Home() {
           </div>
           {voice === "clone" && (
             <p className="note">Copies each person&apos;s voice from the video: a child stays a child, grandma stays
-              grandma. Slow without a graphics card: about 10 s per line (a 20-minute video takes roughly an hour).</p>
+              grandma. Slow without a graphics card: about 5 s per line (a 5-minute video takes roughly 8–10 minutes).</p>
           )}
           <div className="grid">
             <div>
@@ -285,14 +310,14 @@ export default function Home() {
               <span>Sound like the original speaker<small>Follow each person&apos;s pitch and loudness</small></span>
             </label>
             <label className="check">
-              <input type="checkbox" checked={burn} onChange={(e) => setBurn(e.target.checked)} />
-              <span>Burn subtitles into video<small>Always also included as a selectable track + .srt</small></span>
-            </label>
-            <label className="check">
               <input type="checkbox" checked={review} onChange={(e) => setReview(e.target.checked)} />
               <span>Let me check the translation first<small>Edit Khmer lines before the voice is made</small></span>
             </label>
           </div>
+
+          <h2 style={{ marginTop: 22 }}>3. Subtitles &amp; logo</h2>
+          <LookEditor value={look} onChange={setLook} />
+
           <div className="row" style={{ marginTop: 20 }}>
             <button className="btn" disabled={busy} onClick={start}>
               {uploadPct !== null ? `Uploading ${uploadPct}%` : "Start dubbing"}
@@ -327,7 +352,7 @@ export default function Home() {
             <h2 style={{ margin: 0 }}>Check Khmer translation</h2>
             <div className="row">
               <a className="btn ghost sm" href={`${fileBase}km.srt?download=1`}>⬇ Khmer .srt</a>
-              <button className="btn" onClick={() => redub(job.status === "done" ? { voice: reVoice, match: reMatch, bgMode: reBg, burn: reBurn } : {})}>
+              <button className="btn" onClick={() => redub(job.status === "done" ? { voice: reVoice, match: reMatch, bgMode: reBg, ...reLook } : {})}>
                 Generate Khmer voice →
               </button>
             </div>
@@ -391,10 +416,23 @@ export default function Home() {
             <select style={{ width: "auto" }} value={reBg} onChange={(e) => setReBg(e.target.value as "duck" | "none")}>
               <option value="duck">Keep music</option><option value="none">Khmer voice only</option>
             </select>
-            <label className="check"><input type="checkbox" checked={reBurn} onChange={(e) => setReBurn(e.target.checked)} /><span>Burn subtitles</span></label>
-            <button className="btn" onClick={() => redub({ voice: reVoice, match: reMatch, bgMode: reBg, burn: reBurn })}>Re-dub</button>
+            <button className="btn" onClick={() => redub({ voice: reVoice, match: reMatch, bgMode: reBg, ...reLook })}>Re-dub</button>
             <button className="btn ghost" onClick={() => setShowEditor(true)}>Edit subtitles</button>
           </div>
+
+          <div className="row between" style={{ marginTop: 22 }}>
+            <h2 style={{ margin: 0 }}>Subtitle style &amp; logo</h2>
+            <button className="btn ghost sm" onClick={() => setShowLook(!showLook)}>{showLook ? "Close" : "Change"}</button>
+          </div>
+          {showLook && (
+            <>
+              <LookEditor value={reLook} onChange={setReLook} jobId={job.id} previewAt={firstLine} />
+              <div className="row" style={{ marginTop: 14 }}>
+                <button className="btn" onClick={rebuildPicture}>Apply – rebuild the video only</button>
+                <small className="note">Keeps the Khmer voices; only the picture is made again (about 10–40 s per 5 minutes).</small>
+              </div>
+            </>
+          )}
         </section>
       )}
 

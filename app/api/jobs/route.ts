@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { jobDir, jobs, startJob, type Job } from "@/lib/jobs";
+import { parseLogo, parseSubStyle } from "@/lib/branding";
 import { defaultVoice, voiceError, type Opts } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
@@ -26,6 +27,8 @@ export async function POST(req: Request) {
   const q = new URL(req.url).searchParams;
   const isJson = (req.headers.get("content-type") || "").includes("application/json");
   const p: Record<string, string> = isJson ? await req.json() : Object.fromEntries(q);
+  // style and logo come as objects in JSON, or as JSON text in the query string of an upload
+  const obj = (v: unknown) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return undefined; } };
 
   const voice = (p.voice || defaultVoice()) as Opts["voice"];
   const voiceErr = voiceError(voice);
@@ -40,6 +43,8 @@ export async function POST(req: Request) {
     bgMode: p.bgMode === "none" ? "none" : "duck",
     burn: String(p.burn) === "true",
     review: String(p.review) !== "false",
+    sub: parseSubStyle(obj(p.sub)),
+    logo: parseLogo(obj(p.logo)),
   };
 
   const id = randomUUID().slice(0, 10);

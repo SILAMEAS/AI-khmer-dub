@@ -65,6 +65,14 @@ export function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<Bu
   });
 }
 
+/** Width and height of the first video stream. */
+export async function probeSize(file: string): Promise<{ width: number; height: number }> {
+  const out = await run(tool("ffprobe"), ["-v", "error", "-select_streams", "v:0", "-show_entries",
+    "stream=width,height", "-of", "csv=p=0:s=x", file]);
+  const [width, height] = out.toString().trim().split("x").map(Number);
+  return { width: width || 1280, height: height || 720 };
+}
+
 export async function probeDuration(file: string): Promise<number> {
   const out = await run(tool("ffprobe"), ["-v", "error", "-show_entries", "format=duration",
     "-of", "default=nw=1:nk=1", file]);
