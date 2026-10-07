@@ -1,4 +1,11 @@
 /** Types and small helpers shared by the editor's parts. */
+import type { EditOpts } from "@/lib/edit";
+export { DEFAULT_EDIT, cutAt, mergeRanges, outputDuration, punchRanges, toOutput, zoomAt, SPEEDS } from "@/lib/edit";
+export type { EditOpts, Range, Sticker } from "@/lib/edit";
+/** Edits saved earlier (or sent by the server), completed with defaults. */
+export const fullEdit = (e: Partial<EditOpts> | undefined): EditOpts => ({
+  speed: e?.speed ?? 1, cuts: e?.cuts ?? [], stickers: e?.stickers ?? [],
+});
 
 export type Voice = "male" | "female";
 export type VoiceChoice = Voice | "auto" | "clone";
@@ -15,15 +22,18 @@ export type Part = { from: number; to: number; orig: number; khmer: number };
 export type Mix = {
   music: number; duck: number; voice: number; loudnorm: boolean; bgm: number;
   split: boolean; voices: number; khmerTone: Tone; origTone: Tone; parts: Part[];
+  denoise: 0 | 1 | 2; // noise reduction on the original sound: off, light, strong (on export)
 };
 export const FLAT: Tone = { pitch: 0, bass: 0, treble: 0, echo: "none" };
 /** By default the original voices are removed (separated from the music), the music and effects stay. */
 export const DEFAULT_MIX: Mix = {
-  music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0, split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
+  music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0, split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [], denoise: 0,
 };
+/** A project only edited: its own sound at full level, nothing separated. */
+export const EDIT_MIX: Mix = { ...DEFAULT_MIX, music: 100, split: false };
 /** A mix saved earlier (or sent by the server), completed with defaults for settings added since. */
 export const fullMix = (m: Partial<Mix> | undefined): Mix => ({
-  ...DEFAULT_MIX, ...m, khmerTone: { ...FLAT, ...m?.khmerTone }, origTone: { ...FLAT, ...m?.origTone }, parts: m?.parts ?? [],
+  ...DEFAULT_MIX, ...m, denoise: m?.denoise ?? 0, khmerTone: { ...FLAT, ...m?.khmerTone }, origTone: { ...FLAT, ...m?.origTone }, parts: m?.parts ?? [],
 });
 
 export type Job = {
@@ -32,9 +42,10 @@ export type Job = {
   opts: {
     url: string; voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean;
     sub?: object; logo?: object; out?: object; fx?: object; mix?: Partial<Mix>; trim?: { from: number; to: number };
+    mode?: "dub" | "edit"; edit?: Partial<EditOpts>; autoExport?: boolean;
   };
   meta?: { title: string; duration: number; language: string; segments: number; speakers?: number; captions?: string };
-  tracks?: { voice: boolean; vocals: boolean; output: boolean };
+  tracks?: { voice: boolean; vocals: boolean; output: boolean; shapes?: string[]; thumbnail?: boolean };
   task?: { name: "separate"; progress: number; message: string }; // runs in the background, the editor stays usable
   taskError?: string;
 };

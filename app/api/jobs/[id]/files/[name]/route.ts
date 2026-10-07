@@ -16,6 +16,12 @@ const FILES: Record<string, [string, string]> = { // name -> [content type, down
   "vocals.wav": ["audio/wav", " [original voices].wav"],
   "background.wav": ["audio/wav", " [music and effects].wav"],
   "dub_audio.m4a": ["audio/mp4", " [Khmer audio].m4a"],
+  "thumbnail.jpg": ["image/jpeg", " [thumbnail].jpg"],
+  // the same video in more shapes (Export → also make)
+  "output_16x9.mp4": ["video/mp4", " [Khmer] 16x9.mp4"],
+  "output_9x16.mp4": ["video/mp4", " [Khmer] 9x16.mp4"],
+  "output_1x1.mp4": ["video/mp4", " [Khmer] 1x1.mp4"],
+  "output_4x5.mp4": ["video/mp4", " [Khmer] 4x5.mp4"],
 };
 
 const VIDEO_TYPES: Record<string, string> = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska" };
@@ -26,8 +32,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const job = jobs.get(id);
   const sample = /^speaker_\d+\.wav$/.test(name); // voice sample of each person found in the video
   const source = name === "source" && job?.meta; // the video being dubbed (after the cut), for the editor's player
+  // the .srt downloads match the exported video: in its time when parts were cut, the speed changed or an intro added
+  const exported = name.endsWith(".srt") ? path.join(jobDir(id), name.replace(".srt", ".export.srt")) : "";
   const file = sample ? path.join(jobDir(id), VOICES_DIR, name)
-    : source ? path.join(jobDir(id), job.meta!.input) : path.join(jobDir(id), name);
+    : source ? path.join(jobDir(id), job.meta!.input)
+    : exported && fs.existsSync(exported) ? exported : path.join(jobDir(id), name);
   if (!job || !(FILES[name] || sample || source) || !fs.existsSync(file)) {
     return Response.json({ detail: "File not ready" }, { status: 404 });
   }

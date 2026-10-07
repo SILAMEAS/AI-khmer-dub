@@ -4,6 +4,9 @@
  */
 import { fs, path } from "./rt";
 import { ROOT } from "./tools";
+import { parseGlossary, type GlossEntry } from "./glossary";
+export { applyGlossary, parseGlossary, type GlossEntry } from "./glossary";
+import { cutExpressions, outputDuration, timelineEdited, zoomExpr, STICKER_FILE, type EditOpts, type Range, type ZoomMode } from "./edit";
 
 export const BRANDING_DIR = path.join(ROOT, "branding");
 export const FONTS_DIR = path.join(BRANDING_DIR, "fonts");
@@ -17,12 +20,13 @@ export type SubStyle = {
   position: "bottom" | "top"; margin: number;
   bilingual: boolean; // the original line in smaller letters under the Khmer one
   anim: "none" | "fade" | "pop"; // how each line appears
+  karaoke: boolean; hiColor: string; // the word being said lights up in hiColor (CapCut / TikTok style)
 };
 export const DEFAULT_SUB: SubStyle = {
   font: "Khmer UI", size: 20, bold: false,
   color: "#ffffff", outline: "#000000", outlineWidth: 2,
   box: false, boxColor: "#000000", boxOpacity: 0.6,
-  position: "bottom", margin: 28, bilingual: false, anim: "none",
+  position: "bottom", margin: 28, bilingual: false, anim: "none", karaoke: false, hiColor: "#ffd400",
 };
 
 /** The logo slides across the picture for `duration` seconds, once every `every` seconds. */
@@ -44,8 +48,16 @@ export type OutOpts = {
   size: 0 | 480 | 720 | 1080;
   quality: "high" | "standard" | "small";
   fps: 0 | 24 | 25 | 30 | 60; // 0: as the source
+  intro: boolean; outro: boolean; // your channel's intro / end clip (branding/intro.*, outro.*) around the video
+  also: Shape[]; // more shapes made in the same export (output_9x16.mp4 …)
 };
-export const DEFAULT_OUT: OutOpts = { aspect: "original", fit: "blur", canvas: "#000000", size: 0, quality: "standard", fps: 0 };
+export const SHAPES = ["16:9", "9:16", "1:1", "4:5"] as const;
+export type Shape = (typeof SHAPES)[number];
+export const DEFAULT_OUT: OutOpts = {
+  aspect: "original", fit: "blur", canvas: "#000000", size: 0, quality: "standard", fps: 0, intro: false, outro: false, also: [],
+};
+/** File name of the export in one more shape. */
+export const shapeFile = (a: Shape) => `output_${a.replace(":", "x")}.mp4`;
 export const CRF: Record<OutOpts["quality"], number> = { high: 18, standard: 21, small: 26 };
 const ASPECTS: Record<Exclude<OutOpts["aspect"], "original">, number> = { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1, "4:5": 4 / 5 };
 
@@ -67,6 +79,7 @@ export function parseSubStyle(v: unknown): SubStyle {
     position: s.position === "top" ? "top" : "bottom", margin: clamp(s.margin, 0, 200, d.margin),
     bilingual: s.bilingual === true,
     anim: s.anim === "fade" || s.anim === "pop" ? s.anim : "none",
+    karaoke: s.karaoke === true, hiColor: hex(s.hiColor, d.hiColor),
   };
 }
 
@@ -83,12 +96,13 @@ export type FxOpts = {
   brightness: number; contrast: number; saturation: number; sharpen: boolean;
   mirror: boolean; fade: boolean; progress: boolean; progressColor: string;
   title: string; titlePos: "tl" | "tc" | "tr" | "bl" | "br"; titleSize: number; titleColor: string;
+  zoom: ZoomMode; // slow: a gentle Ken Burns zoom in and out; punch: every other line zoomed in a little
 };
 export const DEFAULT_FX: FxOpts = {
   cover: false, coverY: 78, coverH: 14, coverMode: "blur", coverColor: "#000000",
   filter: "none", brightness: 0, contrast: 0, saturation: 0, sharpen: false,
   mirror: false, fade: false, progress: false, progressColor: "#ff3b5c",
-  title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff",
+  title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff", zoom: "none",
 };
 const FILTERS: Record<FxOpts["filter"], string> = {
   none: "",
@@ -115,6 +129,7 @@ export function parseFx(v: unknown): FxOpts {
     title: typeof s.title === "string" ? s.title.replace(/[\r\n{}\\]/g, " ").trim().slice(0, 80) : "",
     titlePos: ["tl", "tc", "tr", "bl", "br"].includes(s.titlePos as string) ? (s.titlePos as FxOpts["titlePos"]) : d.titlePos,
     titleSize: clamp(s.titleSize, 6, 40, d.titleSize), titleColor: hex(s.titleColor, d.titleColor),
+    zoom: s.zoom === "slow" || s.zoom === "punch" ? s.zoom : "none",
   };
 }
 
@@ -139,6 +154,8 @@ export function parseOut(v: unknown): OutOpts {
     size: pick(Number(s.size), [0, 480, 720, 1080] as const, DEFAULT_OUT.size),
     quality: pick(s.quality, ["high", "standard", "small"] as const, DEFAULT_OUT.quality),
     fps: pick(Number(s.fps), [0, 24, 25, 30, 60] as const, DEFAULT_OUT.fps),
+    intro: s.intro === true, outro: s.outro === true,
+    also: [...new Set(Array.isArray(s.also) ? s.also : [])].filter((a): a is Shape => SHAPES.includes(a as Shape)),
   };
 }
 
@@ -239,6 +256,58 @@ export function saveMusic(ext: string, data: Buffer) {
   fs.mkdirSync(BRANDING_DIR, { recursive: true });
   for (const e of MUSIC_EXT) fs.rmSync(path.join(BRANDING_DIR, "music" + e), { force: true });
   fs.writeFileSync(path.join(BRANDING_DIR, "music" + ext), data);
+}
+
+// ---------------------------------------------------------------- stickers (images to put on the picture)
+
+export const STICKERS_DIR = path.join(BRANDING_DIR, "stickers");
+const STICKER_EXT = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+
+/** The sticker library, newest first. */
+export function listStickers(): string[] {
+  if (!fs.existsSync(STICKERS_DIR)) return [];
+  return fs.readdirSync(STICKERS_DIR).filter((n) => STICKER_FILE.test(n))
+    .map((n) => [n, fs.statSync(path.join(STICKERS_DIR, n)).mtimeMs] as const).sort((a, b) => b[1] - a[1]).map(([n]) => n);
+}
+
+/** Adds an image to the library under a safe, unique name; returns that name. */
+export function saveSticker(name: string, data: Buffer): string {
+  const ext = path.extname(name).toLowerCase();
+  if (!STICKER_EXT.includes(ext)) throw new Error("A sticker must be a PNG, JPG, WEBP or GIF image");
+  fs.mkdirSync(STICKERS_DIR, { recursive: true });
+  const stem = path.basename(name, ext).replace(/[^\w-]+/g, "_").slice(0, 40) || "sticker";
+  let file = stem + ext;
+  for (let i = 2; fs.existsSync(path.join(STICKERS_DIR, file)); i++) file = `${stem}_${i}${ext}`;
+  fs.writeFileSync(path.join(STICKERS_DIR, file), data);
+  return file;
+}
+
+export const stickerPath = (file: string) => (STICKER_FILE.test(file) ? path.join(STICKERS_DIR, file) : null);
+
+// ---------------------------------------------------------------- intro / outro clips
+
+export type ClipKind = "intro" | "outro";
+const CLIP_EXT = [".mp4", ".mov", ".mkv", ".webm", ".m4v"];
+export const clipFile = (kind: ClipKind) =>
+  CLIP_EXT.map((e) => path.join(BRANDING_DIR, kind + e)).find((f) => fs.existsSync(f)) ?? null;
+
+export function saveClipFile(kind: ClipKind, ext: string) {
+  if (!CLIP_EXT.includes(ext)) throw new Error("The clip must be an MP4, MOV, MKV or WEBM video");
+  fs.mkdirSync(BRANDING_DIR, { recursive: true });
+  for (const e of CLIP_EXT) fs.rmSync(path.join(BRANDING_DIR, kind + e), { force: true });
+  return path.join(BRANDING_DIR, kind + ext);
+}
+
+// ---------------------------------------------------------------- glossary
+
+const GLOSSARY_FILE = path.join(BRANDING_DIR, "glossary.json");
+
+export function loadGlossary(): GlossEntry[] {
+  try { return parseGlossary(JSON.parse(fs.readFileSync(GLOSSARY_FILE, "utf8"))); } catch { return []; }
+}
+export function saveGlossary(g: GlossEntry[]) {
+  fs.mkdirSync(BRANDING_DIR, { recursive: true });
+  fs.writeFileSync(GLOSSARY_FILE, JSON.stringify(g, null, 1), "utf8");
 }
 
 // ---------------------------------------------------------------- fonts
@@ -372,10 +441,15 @@ export function forceStyle(s: SubStyle): string {
  * ffmpeg -filter_complex for the picture: burned subtitles and/or the sliding logo. Run with cwd = job folder
  * (paths inside a filter must not contain a drive letter's colon). `logoInput` is the -i index of the logo.
  * `shift` moves the clock (for a preview frame cut from the middle of the video).
+ * `stickers`: images on the picture, each with the -i index of its file. `punch`: when the punch-in zoom is on.
+ * `edit`: parts cut out and speed - the last step, after which the clock is the exported video's (fade and progress
+ * bar follow it). `force`: a filter even when nothing changes the picture (the cut needs one).
  */
 export function pictureFilter(o: {
   burn: boolean; sub: SubStyle; logo: LogoOpts | null; logoInput: number; width: number; height: number; shift?: number;
   out?: OutOpts; srt?: string; fx?: FxOpts; title?: string; duration?: number; texts?: string;
+  stickers?: { input: number; x: number; y: number; size: number; from: number; to: number }[]; punch?: Range[];
+  edit?: EditOpts; force?: boolean;
 }): string | null {
   const steps: string[] = [];
   let last = "0:v";
@@ -400,6 +474,12 @@ export function pictureFilter(o: {
     fx.sharpen ? "unsharp=5:5:0.7" : "",
   ].filter(Boolean);
   if (color.length) { steps.push(`[${last}]${color.join(",")}[cf]`); last = "cf"; }
+  const zoom = zoomExpr(fx.zoom, o.punch ?? []);
+  if (zoom) { // enlarged around the centre, cut back to the picture's own size (frame by frame: t moves)
+    steps.push(`[${last}]scale=w='2*trunc(iw*(${zoom})/2)':h='2*trunc(ih*(${zoom})/2)':eval=frame:flags=bicubic,`
+      + `crop=${o.width}:${o.height},setsar=1[zm]`);
+    last = "zm";
+  }
   // new shape / size first, so subtitles and logo are drawn at the final resolution
   const { width: W, height: H } = o.out ? outSize(o.out, o.width, o.height) : o;
   if (W !== o.width || H !== o.height) {
@@ -432,6 +512,13 @@ export function pictureFilter(o: {
     steps.push(`[${last}]subtitles=${o.texts}:fontsdir='${fontsdir}'[tx]`);
     last = "tx";
   }
+  (o.stickers ?? []).forEach((s, i) => { // each from its own looped image input, only while it is on
+    const w = Math.max(8, Math.round((W * s.size) / 100 / 2) * 2);
+    steps.push(`[${s.input}:v]scale=${w}:-2,format=rgba[sk${i}]`,
+      `[${last}][sk${i}]overlay=x='W*${(s.x / 100).toFixed(4)}-w/2':y='H*${(s.y / 100).toFixed(4)}-h/2'`
+      + `:enable='between(t,${s.from.toFixed(3)},${s.to.toFixed(3)})':shortest=1[st${i}]`);
+    last = `st${i}`;
+  });
   if (o.logo?.enabled) {
     const { every: E, duration: D } = o.logo;
     const w = Math.max(16, Math.round((W * o.logo.size) / 100 / 2) * 2);
@@ -441,7 +528,15 @@ export function pictureFilter(o: {
     steps.push(`[${last}][lg]overlay=x='-w+(W+w)*mod(t,${E})/${D}':y='${y}':enable='lt(mod(t,${E}),${D})':shortest=1[l]`);
     last = "l";
   }
-  const dur = o.duration ?? 0;
+  let dur = o.duration ?? 0;
+  // the cut and the speed: frames inside a cut are dropped and every later one moved back by what was cut before
+  // it, then the clock runs at the chosen speed (the sound gets the same in mux)
+  if (o.edit && timelineEdited(o.edit) && !o.shift) {
+    const { keep, shift } = cutExpressions(o.edit.cuts);
+    steps.push(`[${last}]${o.edit.cuts.length ? `select='${keep}',` : ""}setpts='(PTS-(${shift})/TB)/${o.edit.speed}'[ed]`);
+    last = "ed";
+    dur = outputDuration(o.edit, dur);
+  }
   if (fx.progress && dur > 0) { // grows from the left edge to the full width over the video
     const bar = Math.max(4, Math.round(H / 160 / 2) * 2);
     steps.push(`color=c=${fx.progressColor.replace("#", "0x")}:s=${W}x${bar}:r=25[pb]`,
@@ -453,7 +548,7 @@ export function pictureFilter(o: {
     last = "fd";
   }
   if (o.out?.fps && !o.shift) { steps.push(`[${last}]fps=${o.out.fps}[fr]`); last = "fr"; }
-  if (last === "0:v") return null;
+  if (last === "0:v" && !o.force) return null;
   steps.push(`[${last}]format=yuv420p[v]`);
   return steps.join(";");
 }

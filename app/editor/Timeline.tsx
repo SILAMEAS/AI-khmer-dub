@@ -6,18 +6,22 @@
  * names on the left while scrolling. Ctrl + mouse wheel zooms around the pointer.
  */
 import { useEffect, useRef, useState } from "react";
-import { clock, type Part, type Segment } from "./common";
+import { clock, type Part, type Range, type Segment, type Sticker } from "./common";
 
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 const LABEL = 96;   // width of the track names column (px)
 const MAX_ZOOM = 30;
 
 export function Timeline({ duration, time, onSeek, segs, edited, selected, onSelect, parts, selectedPart, onSelectPart,
-  trim, onTrim, speakers }: {
+  trim, onTrim, speakers, cuts, selectedCut, onSelectCut, marks, stickers, selectedSticker, onSelectSticker }: {
   duration: number; time: number; onSeek: (t: number) => void;
   segs: Segment[] | null; edited: Set<number>; selected: number | null; onSelect: (i: number | null) => void;
   parts: Part[]; selectedPart: number | null; onSelectPart: (i: number | null) => void;
   trim: { from: number; to: number } | null; onTrim?: (t: { from: number; to: number }) => void; speakers: number;
+  /** parts cut out of the video, the In / Out marks for the next cut, stickers */
+  cuts: Range[]; selectedCut: number | null; onSelectCut: (i: number | null) => void;
+  marks: { in: number | null; out: number | null };
+  stickers: Sticker[]; selectedSticker: string | null; onSelectSticker: (id: string | null) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -94,7 +98,9 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
   return (
     <div className="timeline">
       <div className="tl-bar">
-        <span className="note">{segs ? `${segs.length} lines` : "Timeline"}{edited.size ? ` · ${edited.size} edited` : ""}</span>
+        <span className="note">{segs?.length ? `${segs.length} lines` : "Timeline"}{edited.size ? ` · ${edited.size} edited` : ""}
+          {cuts.length ? ` · ${cuts.length} cut${cuts.length > 1 ? "s" : ""} (−${clock(cuts.reduce((s, c) => s + c.to - c.from, 0))})` : ""}
+          {" · "}<kbd>I</kbd> <kbd>O</kbd> mark · <kbd>Del</kbd> cut out</span>
         <div className="row nowrap tl-zoom">
           <button type="button" onClick={() => setZoom((z) => Math.max(1, z / 1.5))} title="Zoom out" disabled={zoom <= 1}>－</button>
           <input type="range" min={1} max={MAX_ZOOM} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} title="Zoom (Ctrl + wheel)" />
@@ -109,6 +115,7 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
             <div>🎬 Video</div>
             <div>💬 Subtitles</div>
             <div>🔊 Sound</div>
+            <div>🖼 Stickers</div>
           </div>
           <div className="tl-content" style={{ width: full }} onPointerDown={(e) => drag(e, "seek")}>
             <div className="tl-ruler">
@@ -124,6 +131,16 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
                   <div className="tl-handle" style={{ left: x(tEnd) - 5 }} title="End of the cut" onPointerDown={(e) => drag(e, "to")} />
                 </>
               )}
+              {cuts.map((c, i) => (
+                <div key={i} className={`tl-cut ${selectedCut === i ? "on" : ""}`} style={{ left: x(c.from), width: Math.max(3, x(c.to - c.from)) }}
+                  title={`Cut out ${clock(c.from, true)} – ${clock(c.to, true)} · click to select, Delete key or ↺ to put back`}
+                  onPointerDown={(e) => { e.stopPropagation(); onSelectCut(i); onSeek(c.from); }} />
+              ))}
+              {marks.in !== null && marks.out !== null && marks.out > marks.in && (
+                <div className="tl-range" style={{ left: x(marks.in), width: x(marks.out - marks.in) }} />
+              )}
+              {marks.in !== null && <div className="tl-mark in" style={{ left: x(marks.in) }} title="In" />}
+              {marks.out !== null && <div className="tl-mark out" style={{ left: x(marks.out) }} title="Out" />}
             </div>
             <div className="tl-track">
               {segs?.map((s, i) => (
@@ -140,6 +157,15 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
                 <div key={i} className={`tl-clip part ${selectedPart === i ? "on" : ""}`} style={{ left: x(p.from), width: Math.max(4, x(p.to - p.from)) }}
                   title={`Original ${p.orig}% · Khmer ${p.khmer}%`} onPointerDown={(e) => { e.stopPropagation(); onSelectPart(i); }}>
                   <span>O {p.orig}% · K {p.khmer}%</span>
+                </div>
+              ))}
+            </div>
+            <div className="tl-track">
+              {stickers.map((s) => (
+                <div key={s.id} className={`tl-clip sticker ${selectedSticker === s.id ? "on" : ""}`}
+                  style={{ left: x(s.from), width: Math.max(4, x(s.to - s.from)) }} title={`${clock(s.from)} – ${clock(s.to)}`}
+                  onPointerDown={(e) => { e.stopPropagation(); onSelectSticker(s.id); onSeek(s.from); }}>
+                  <img src={`/api/branding/stickers/${encodeURIComponent(s.file)}`} alt="" />
                 </div>
               ))}
             </div>

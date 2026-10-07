@@ -1,5 +1,5 @@
 import { fs, path } from "./rt";
-import { dub, prepare, remix, render, separateVoices, type Meta, type Opts } from "./pipeline";
+import { dub, editOnly, prepare, remix, render, separateVoices, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 
 export type Job = {
@@ -22,7 +22,10 @@ export type Job = {
 };
 
 // Kept on globalThis so all route bundles (and dev hot reloads) share one queue.
-type Store = { jobs: Map<string, Job>; queue: Promise<void> };
+// bg: separating voices from music in the background has its own lane - in the main queue a 2-hour film's
+// separation (~20 min) kept "Generate Khmer voice" waiting with nothing to show, though the voice comes from
+// Microsoft's servers and hardly needs this PC.
+type Store = { jobs: Map<string, Job>; queue: Promise<void>; bg?: Promise<void> };
 const g = globalThis as unknown as { __khmerDub?: Store };
 
 function init(): Store {
@@ -68,6 +71,17 @@ function fail(job: Job, e: unknown) {
   save(job);
 }
 
+/** Batch: the project goes on to the exported video by itself, once (afterwards it is edited like any other). */
+async function autoExport(job: Job, report: ReturnType<typeof reporter>) {
+  if (!job.opts.autoExport) return;
+  job.opts.autoExport = false;
+  await remix(jobDir(job.id), job.opts, job.meta!, report);
+  report("done", 1, "Done");
+  job.exported = job.version;
+  Object.assign(job, { message: "Exported" });
+  save(job);
+}
+
 async function runDub(job: Job) {
   try {
     Object.assign(job, { status: "running", error: undefined });
@@ -75,8 +89,9 @@ async function runDub(job: Job) {
     const report = reporter(job);
     const warning = await dub(jobDir(job.id), job.opts, job.meta!, report);
     report("done", 1, "Done"); // closes the last stage's timing
-    Object.assign(job, { status: "done", stage: "done", progress: 1, message: warning ?? "Ready to edit and export",
-      version: (job.version ?? 0) + 1 });
+    job.version = (job.version ?? 0) + 1;
+    await autoExport(job, report);
+    Object.assign(job, { status: "done", stage: "done", progress: 1, message: warning ?? (job.exported === job.version ? "Exported" : "Ready to edit and export") });
     save(job);
   } catch (e) { fail(job, e); }
 }
@@ -88,7 +103,14 @@ async function runPrepare(job: Job) {
     const report = reporter(job);
     job.meta = await prepare(jobDir(job.id), job.opts, report);
     report("review", 1, "");
-    if (job.opts.review) {
+    if (editOnly(job.opts)) { // nothing to voice: straight to the editor
+      job.version = (job.version ?? 0) + 1;
+      await autoExport(job, report);
+      Object.assign(job, { status: "done", stage: "done", progress: 1, message: job.exported === job.version ? "Exported" : "Ready to edit" });
+      save(job);
+      return;
+    }
+    if (job.opts.review && !job.opts.autoExport) {
       Object.assign(job, { status: "review", stage: "review", progress: 1,
         message: "Check the Khmer translation, then generate the voice" });
       save(job);
@@ -96,6 +118,15 @@ async function runPrepare(job: Job) {
     }
   } catch (e) { fail(job, e); return; }
   await runDub(job);
+}
+
+/** What a queued job waits for, in words (a long wait with only "Waiting in queue" looks like a freeze). */
+function waiting(job: Job) {
+  const ahead = [...jobs.values()].filter((j) => j !== job && (j.status === "running" || j.status === "queued"));
+  const now = ahead.find((j) => j.status === "running");
+  if (!now) return "Waiting in queue";
+  const name = (now.meta?.title || now.title || "another video").slice(0, 40);
+  return `Waiting for "${name}" (${now.message.slice(0, 40)})${ahead.length > 1 ? ` and ${ahead.length - 1} more` : ""}`;
 }
 
 // One heavy job at a time: whisper and ffmpeg already use every CPU core.
@@ -109,7 +140,7 @@ export function startJob(job: Job) {
 
 /** The first step failed (e.g. the PC ran out of memory): run it again; a downloaded video is used again. */
 export function retryPrepare(job: Job) {
-  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
+  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: waiting(job), error: undefined });
   startJob(job);
 }
 
@@ -118,7 +149,7 @@ export function retryPrepare(job: Job) {
  * With `sound`, the Khmer lines already made are also mixed again (new sound levels).
  */
 export function startRender(job: Job, sound = false) {
-  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
+  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: waiting(job), error: undefined });
   save(job);
   enqueue(async () => {
     try {
@@ -139,7 +170,8 @@ export function startSeparate(job: Job) {
   if (job.task) return;
   Object.assign(job, { task: { name: "separate", progress: 0, message: "Waiting to separate voices from music" }, taskError: undefined });
   save(job);
-  enqueue(async () => {
+  const lane = (fn: () => Promise<void>) => { store.bg = (store.bg ?? Promise.resolve()).then(fn, fn); };
+  lane(async () => {
     try {
       await separateVoices(jobDir(job.id), job.meta!, (_stage, progress, message) => (job.task = { name: "separate", progress, message }));
     } catch (e) {
@@ -153,7 +185,7 @@ export function startSeparate(job: Job) {
 }
 
 export function startDub(job: Job) {
-  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: "Waiting in queue", error: undefined });
+  Object.assign(job, { status: "queued", stage: "queued", progress: 0, message: waiting(job), error: undefined });
   save(job);
   enqueue(() => runDub(job));
 }

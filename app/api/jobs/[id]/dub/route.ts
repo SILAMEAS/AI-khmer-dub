@@ -1,4 +1,5 @@
 import { parseFx, parseLogo, parseOut, parseSubStyle } from "@/lib/branding";
+import { parseEdit } from "@/lib/edit";
 import { jobDir, jobs, startDub } from "@/lib/jobs";
 import { loadSegments, parseMix, saveSegments, voiceError, VOICES, type Opts, type Voice } from "@/lib/pipeline";
 
@@ -7,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 type Body = {
   voice?: string; match?: boolean; rate?: number; bgMode?: string; burn?: boolean; sub?: unknown; logo?: unknown;
-  out?: unknown; mix?: unknown; fx?: unknown;
+  out?: unknown; mix?: unknown; fx?: unknown; edit?: unknown;
   segments?: { i: number; km: string; voice?: string; speaker?: number }[];
 };
 
@@ -34,6 +35,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (b.out) job.opts.out = parseOut(b.out);
   if (b.fx) job.opts.fx = parseFx(b.fx);
   if (b.mix) job.opts.mix = parseMix(b.mix);
+  if (b.edit) job.opts.edit = parseEdit(b.edit);
   if (b.segments?.length) {
     const segs = loadSegments(jobDir(job.id));
     for (const e of b.segments) {

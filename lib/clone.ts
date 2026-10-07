@@ -48,7 +48,19 @@ export function stemsReady(jd: string, duration: number) {
 }
 
 /** Voices and music/effects as separate tracks (for clean voice samples and a dub without the old voices). */
-export async function separate(jd: string, input: string, duration: number, onProgress: (f: number) => void) {
+export function separate(jd: string, input: string, duration: number, onProgress: (f: number) => void): Promise<void> {
+  // asked for again while it runs (the background task, then an export): wait for the same run, never two at once
+  const busy = (g.__khmerSeparating ??= new Map());
+  const now = busy.get(jd);
+  if (now) { now.listeners.add(onProgress); return now.done; }
+  const listeners = new Set([onProgress]);
+  const done = separateOnce(jd, input, duration, (f) => listeners.forEach((l) => l(f))).finally(() => busy.delete(jd));
+  busy.set(jd, { done, listeners });
+  return done;
+}
+const g = globalThis as unknown as { __khmerSeparating?: Map<string, { done: Promise<void>; listeners: Set<(f: number) => void> }> };
+
+async function separateOnce(jd: string, input: string, duration: number, onProgress: (f: number) => void) {
   if (stemsReady(jd, duration)) return;
   // written under temporary names and renamed only when complete, so an interrupted run never looks finished
   const part = (f: string) => path.join(jd, f.replace(".wav", ".part.wav"));

@@ -166,6 +166,7 @@ export function useLiveAudio(p: EngineIn) {
         const el = ch[key]?.el;
         if (!el) continue;
         const want = key === "bgm" && el.duration ? t % el.duration : t;
+        if (key !== "bgm" && el.playbackRate !== v.playbackRate) el.playbackRate = v.playbackRate; // the video's speed
         if (v.paused || !enabled) { if (!el.paused) el.pause(); continue; }
         if (Math.abs(el.currentTime - want) > 0.25) el.currentTime = want;
         if (el.paused) el.play().catch(() => {});
@@ -283,6 +284,13 @@ export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, c
       {err && <div className="err">{err}</div>}
       <label className="check"><input type="checkbox" checked={m.loudnorm} onChange={(e) => set({ loudnorm: e.target.checked })} />
         <span>Normalise loudness<small>−14 LUFS, as YouTube, Facebook and TikTok play (applied on export)</small></span></label>
+      <h4>Reduce noise</h4>
+      <div className="seg-btns">
+        {([[0, "Off"], [1, "Light"], [2, "Strong"]] as const).map(([v, n]) => (
+          <button type="button" key={v} className={m.denoise === v ? "on" : ""} disabled={!keep} onClick={() => set({ denoise: v })}>{n}</button>
+        ))}
+      </div>
+      <small className="note">Takes hiss, hum and rumble out of the original sound (applied on export). Strong can make voices a little thin.</small>
     </div>
   );
 }

@@ -11,9 +11,15 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { BIN, MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
 import { analyzeLines, median } from "./voice";
 import {
-  CRF, FONTS_DIR, logoFile, musicFile, parseFx, parseLogo, parseOut, parseSubStyle, pictureFilter, titleAss,
-  type FxOpts, type LogoOpts, type OutOpts, type SubStyle,
+  CRF, FONTS_DIR, applyGlossary, clipFile, loadGlossary, logoFile, musicFile, outSize, parseFx, parseLogo, parseOut,
+  parseSubStyle, pictureFilter, shapeFile, stickerPath, titleAss, SHAPES, type FxOpts, type LogoOpts, type OutOpts,
+  type SubStyle,
 } from "./branding";
+import {
+  atempo, cutExpressions, mapRange, mergeRanges, outputDuration, parseEdit, punchRanges, timelineEdited,
+  type EditOpts, type Range,
+} from "./edit";
+import { timeWords } from "./words";
 import { findCaptions } from "./captions";
 import { download, reusableInput } from "./download";
 import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample, stemsReady } from "./clone";
@@ -62,7 +68,12 @@ export type Opts = {
   voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean; review: boolean;
   sub?: SubStyle; logo?: LogoOpts; out?: OutOpts; fx?: FxOpts; // look and format of the video (lib/branding.ts)
   trim?: Trim; mix?: MixOpts;
+  /** edit: only editing (cut, effects, export) with the video's own sound - no speech recognition, no Khmer voice */
+  mode?: "dub" | "edit";
+  edit?: EditOpts; // parts cut out, speed, stickers (lib/edit.ts)
+  autoExport?: boolean; // go all the way to the exported video without stopping (batch)
 };
+export const editOnly = (o: Opts) => o.mode === "edit";
 /** Part of the video to dub, in seconds of the source (to = 0: until the end). */
 export type Trim = { from: number; to: number };
 /**
@@ -73,11 +84,11 @@ export type Trim = { from: number; to: number };
  * split: separate the original voices from the music (Demucs; always so with voice cloning), so that
  * voices: the original voices get their own level (%; 0 = removed) and origTone their own sound;
  * khmerTone: sound of the Khmer voice; parts: other levels for stretches of the video (original sound and
- * Khmer voice, in %).
+ * Khmer voice, in %); denoise: hiss and hum taken out of the original sound (0 off, 1 light, 2 strong).
  */
 export type MixOpts = {
   music: number; duck: number; voice: number; loudnorm: boolean; bgm: number;
-  split: boolean; voices: number; khmerTone: Tone; origTone: Tone; parts: Part[];
+  split: boolean; voices: number; khmerTone: Tone; origTone: Tone; parts: Part[]; denoise: 0 | 1 | 2;
 };
 /** pitch: semitones; bass / treble: dB; echo: none, a room or a hall. */
 export type Tone = { pitch: number; bass: number; treble: number; echo: "none" | "room" | "hall" };
@@ -86,7 +97,7 @@ const FLAT: Tone = { pitch: 0, bass: 0, treble: 0, echo: "none" };
 // the original voices are removed by default (separated from the music when the voice tools are installed)
 export const DEFAULT_MIX: MixOpts = {
   music: 80, duck: -1, voice: 0, loudnorm: true, bgm: 0,
-  split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [],
+  split: true, voices: 0, khmerTone: FLAT, origTone: FLAT, parts: [], denoise: 0,
 };
 
 const num = (v: unknown, lo: number, hi: number, d: number) =>
@@ -106,7 +117,7 @@ export function parseMix(v: unknown): MixOpts {
   return { music: num(m.music, 0, 100, DEFAULT_MIX.music), duck: duck < 0 ? -1 : duck,
     voice: num(m.voice, -10, 10, DEFAULT_MIX.voice), loudnorm: m.loudnorm !== false, bgm: num(m.bgm, 0, 100, 0),
     split: m.split === undefined ? DEFAULT_MIX.split : m.split === true, voices: num(m.voices, 0, 150, 0), khmerTone: tone(m.khmerTone), origTone: tone(m.origTone),
-    parts };
+    parts, denoise: m.denoise === 1 || m.denoise === 2 ? m.denoise : 0 };
 }
 /** Cut points from the browser; undefined when the whole video is used. */
 export function parseTrim(v: unknown): Trim | undefined {
@@ -150,7 +161,7 @@ function writeSrt(file: string, items: [number, number, string][]): void {
  * Subtitles as shown in the video: km.srt (Khmer), bilingual.srt (Khmer + original) and subs.json, from which
  * the burned-in subtitles are made in the chosen style.
  */
-type Sub = [number, number, string, string]; // start, end, Khmer, original
+type Sub = [number, number, string, string, number?]; // start, end, Khmer, original, end of the Khmer speech
 function writeSubs(jd: string, subs: Sub[]) {
   const shown = subs.filter((x) => x[2].trim()); // a line without Khmer text is not dubbed
   fs.writeFileSync(path.join(jd, "subs.json"), JSON.stringify(shown), "utf8");
@@ -165,18 +176,57 @@ const ANIM: Record<SubStyle["anim"], string> = {
 
 /**
  * The subtitle file to burn in: km.srt, or one made for the style: the original in smaller letters under the
- * Khmer (bilingual) and / or an animation on each line.
+ * Khmer (bilingual), an animation on each line and / or karaoke - one entry per word, the word being said in the
+ * highlight colour, timed over the Khmer speech (lib/words.ts).
  */
 function burnSrt(jd: string, sub: SubStyle, name: string): string {
   const file = path.join(jd, "subs.json");
-  if ((!sub.bilingual && sub.anim === "none") || !fs.existsSync(file)) return "km.srt";
+  if ((!sub.bilingual && sub.anim === "none" && !sub.karaoke) || !fs.existsSync(file)) return "km.srt";
   const subs: Sub[] = JSON.parse(fs.readFileSync(file, "utf8"));
   const small = Math.max(8, Math.round(sub.size * 0.72));
   // ffmpeg reads <font> tags in .srt; < > { } in the text itself would be taken as tags
   const clean = (t: string) => t.replace(/[<>{}]/g, "").trim();
-  writeSrt(path.join(jd, name), subs.map(([a, b, km, text]) =>
-    [a, b, ANIM[sub.anim] + clean(km) + (sub.bilingual ? `\n<font size="${small}">${clean(text)}</font>` : "")]));
+  const under = (text: string) => (sub.bilingual ? `\n<font size="${small}">${clean(text)}</font>` : "");
+  const items: [number, number, string][] = [];
+  for (const [a, b, km, text, spoken] of subs) {
+    if (!sub.karaoke) { items.push([a, b, ANIM[sub.anim] + clean(km) + under(text)]); continue; }
+    const words = timeWords(clean(km), a, spoken && spoken > a + 0.3 ? Math.min(b, spoken) : b); // no voice: the line's time
+    words.forEach((w, i) => {
+      const line = words.map((x, k) => (k === i ? `<font color="${sub.hiColor}">${x.text}</font>` : x.text)).join("");
+      // the line appears (animated) with its first word; the last word stays lit until the line goes
+      items.push([w.from, i === words.length - 1 ? b : words[i + 1].from, (i === 0 ? ANIM[sub.anim] : "") + line + under(text)]);
+    });
+  }
+  writeSrt(path.join(jd, name), items);
   return name;
+}
+
+/**
+ * Subtitle files in the exported video's time (parts cut out, speed, an intro before it): the track inside the
+ * video and the .srt downloads then match it. Returns the name for the track.
+ */
+function exportSubs(jd: string, edit: EditOpts, offset: number): string {
+  const names = ["km.srt", "bilingual.srt", "original.srt"];
+  const stale = () => names.forEach((n) => fs.rmSync(path.join(jd, n.replace(".srt", ".export.srt")), { force: true }));
+  const file = path.join(jd, "subs.json");
+  if ((!timelineEdited(edit) && !offset) || !fs.existsSync(file)) { stale(); return "km.srt"; }
+  const map = (a: number, b: number) => {
+    const r = mapRange(edit, a, b);
+    return r && [r[0] + offset, r[1] + offset] as [number, number];
+  };
+  const subs: Sub[] = JSON.parse(fs.readFileSync(file, "utf8"));
+  const timed = (pick: (s: Sub) => string, from: (s: Sub) => [number, number]) => subs.flatMap((s) => {
+    const r = map(...from(s));
+    return r ? [[r[0], r[1], pick(s)] as [number, number, string]] : [];
+  });
+  writeSrt(path.join(jd, "km.export.srt"), timed((s) => s[2], (s) => [s[0], s[1]]));
+  writeSrt(path.join(jd, "bilingual.export.srt"), timed((s) => `${s[2].trim()}\n${s[3].trim()}`, (s) => [s[0], s[1]]));
+  const segs = fs.existsSync(path.join(jd, "segments.json")) ? loadSegments(jd) : [];
+  writeSrt(path.join(jd, "original.export.srt"), segs.flatMap((s) => {
+    const r = map(s.start, s.end);
+    return r ? [[r[0], r[1], s.text] as [number, number, string]] : [];
+  }));
+  return "km.export.srt";
 }
 
 export const loadSegments = (jd: string): Segment[] =>
@@ -480,6 +530,10 @@ async function googleTranslate(text: string, src: string): Promise<string> {
 
 async function translate(segs: Segment[], srcLang: string, report: Report) {
   const src = srcLang === "zh" ? "zh-CN" : srcLang === "en" ? "en" : "auto";
+  // glossary: its words are put in Khmer before translating (the translator leaves Khmer as it is) and once more
+  // after (Khmer words the translator gets wrong)
+  const glossary = loadGlossary();
+  const source = (s: Segment) => applyGlossary(s.text.replace(/\n/g, " "), glossary);
   // ~4500-char chunks: far fewer requests and the translator sees context
   const chunks: number[][] = [];
   let cur: number[] = [], size = 0;
@@ -492,10 +546,11 @@ async function translate(segs: Segment[], srcLang: string, report: Report) {
 
   let done = 0;
   for (const chunk of chunks) {
-    const joined = chunk.map((i) => segs[i].text.replace(/\n/g, " ")).join("\n");
+    const joined = chunk.map((i) => source(segs[i])).join("\n");
     const lines = (await googleTranslate(joined, src)).split("\n").map((l) => l.trim()).filter(Boolean);
     if (lines.length === chunk.length) chunk.forEach((i, k) => (segs[i].km = lines[k]));
-    else for (const i of chunk) segs[i].km = await googleTranslate(segs[i].text, src); // line count drifted
+    else for (const i of chunk) segs[i].km = await googleTranslate(source(segs[i]), src); // line count drifted
+    if (glossary.length) for (const i of chunk) segs[i].km = applyGlossary(segs[i].km, glossary);
     done += chunk.length;
     report("translate", done / segs.length, `Translating to Khmer ${done}/${segs.length}`);
   }
@@ -526,8 +581,8 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   else src = path.join(jd, opts.inputName!);
 
   // subtitles the video already has are used as they are: nothing to listen to (much faster than Whisper)
-  report("transcribe", 0, "Looking for subtitles in the video");
-  const captions = await findCaptions(src, jd, opts.sourceLang, opts.trim)
+  if (!editOnly(opts)) report("transcribe", 0, "Looking for subtitles in the video");
+  const captions = editOnly(opts) ? null : await findCaptions(src, jd, opts.sourceLang, opts.trim)
     .catch((e) => { console.error(e); return null; });
 
   // only the sound came so far: cut that now, the picture once it is there
@@ -537,6 +592,19 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   const wav = path.join(jd, "audio16k.wav");
   await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
+  /** A link's picture, once it has come down (it went on downloading while the sound was worked on). */
+  const picture = async (meta: Meta) => {
+    if (!pending?.soundOnly) return meta;
+    pending.watch();
+    let video = await pending.video;
+    if (opts.trim) video = await cut(jd, video, opts.trim, report);
+    meta.input = path.basename(video);
+    return meta;
+  };
+  if (editOnly(opts)) { // straight to the editor: nothing to recognise or translate
+    saveSegments(jd, []);
+    return picture({ input: path.basename(src), title, duration, language: "", segments: 0 });
+  }
 
   // Voice cloning needs the voices apart from the music first (speech under music is then also recognised
   // better). The other voices don't wait for it: the editor separates them in the background afterwards.
@@ -562,13 +630,7 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   saveSegments(jd, segs);
   writeSrt(path.join(jd, "original.srt"), segs.map((s) => [s.start, s.end, s.text]));
   writeSubs(jd, segs.map((s) => [s.start, s.end, s.km, s.text]));
-  if (pending?.soundOnly) { // the picture of a link came down meanwhile (or is nearly there)
-    pending.watch();
-    let video = await pending.video;
-    if (opts.trim) video = await cut(jd, video, opts.trim, report);
-    meta.input = path.basename(video);
-  }
-  return meta;
+  return picture(meta); // the picture of a link came down meanwhile (or is nearly there)
 }
 
 /** The chosen part of a link's sound, while its picture is still downloading (cut() does the picture later). */
@@ -1014,19 +1076,23 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
       : ["-f", "lavfi", "-t", duration.toFixed(3), "-i", `anullsrc=r=${SR}:cl=stereo`]),
     ...(voices ? ["-i", vocals] : []),
     ...(music ? ["-stream_loop", "-1", "-i", music] : []),
-    "-i", path.join(jd, VOICE_TRACK),
+    // no Khmer voice (a project only edited, not dubbed): silence in its place
+    ...(fs.existsSync(path.join(jd, VOICE_TRACK)) ? ["-i", path.join(jd, VOICE_TRACK)]
+      : ["-f", "lavfi", "-t", duration.toFixed(3), "-i", `anullsrc=r=${SR}:cl=mono`]),
   ];
   const khmerIn = (voices ? 2 : 1) + (music ? 1 : 0);
   const rb = await hasFilter("rubberband");
   const khmerTone = toneFilter(m.khmerTone, rb);
   const stereo = `aformat=channel_layouts=stereo,aresample=${SR}`;
   const origTone = toneFilter(m.origTone, rb);
+  // noise reduction on the original sound: rumble below 60 Hz cut, hiss and hum followed and taken out (afftdn)
+  const den = m.denoise ? `,highpass=f=60,afftdn=nr=${m.denoise === 2 ? 20 : 10}:nf=-40:tn=1` : "";
   // channels 1-2: music & effects (and your music), 3-4: the original voices (silent when not kept), 5: Khmer voice
   const graph = [
-    `[0:a]${stereo},volume=${high.toFixed(3)}[m0]`,
+    `[0:a]${stereo}${bgMode === "duck" ? den : ""},volume=${high.toFixed(3)}[m0]`,
     music ? `[${voices ? 2 : 1}:a]${stereo},volume=${(m.bgm / 100).toFixed(3)}[bm];[m0][bm]amix=inputs=2:duration=first:normalize=0[m]`
       : "[m0]anull[m]",
-    voices ? `[1:a]${stereo}${origTone ? "," + origTone : ""},volume=${(m.voices / 100).toFixed(3)}[v]`
+    voices ? `[1:a]${stereo}${den}${origTone ? "," + origTone : ""},volume=${(m.voices / 100).toFixed(3)}[v]`
       : `anullsrc=r=${SR}:cl=stereo[v]`,
     `[${khmerIn}:a]aformat=channel_layouts=mono,aresample=${SR}${khmerTone ? "," + khmerTone : ""},volume=${(10 ** (m.voice / 20)).toFixed(4)}[k]`,
     // all in one sample format, or amerge can't put them together; padded, as any of them may end early
@@ -1059,55 +1125,146 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
 // ---------------------------------------------------------------- stage 6: final video
 
 /**
- * Picture filters (format, effects, burned subtitles, title, sliding logo) for this job's options, plus the extra
- * logo input. `preview`: files for a preview frame get their own names, so a video being built is not disturbed.
+ * Picture filters (format, effects, zoom, burned subtitles, title, stickers, sliding logo, cut and speed) for this
+ * job's options, plus the extra inputs (logo, stickers; -i 3 onwards). `preview`: files for a preview frame get
+ * their own names, so a video being built is not disturbed. `shape`: another format than the project's (several
+ * shapes in one export).
  */
-async function look(jd: string, src: string, opts: Opts, duration: number, shift?: number, preview = false) {
+async function look(jd: string, src: string, opts: Opts, duration: number, shift?: number, preview = false, shape?: OutOpts) {
   const logo = opts.logo?.enabled ? logoFile() : null;
   fs.mkdirSync(FONTS_DIR, { recursive: true });
-  const sub = parseSubStyle(opts.sub), fx = parseFx(opts.fx);
+  const sub = parseSubStyle(opts.sub), fx = parseFx(opts.fx), edit = parseEdit(opts.edit), out = shape ?? parseOut(opts.out);
+  const burn = opts.burn && fs.existsSync(path.join(jd, "km.srt")); // a project only edited has no subtitles
   let title: string | undefined;
   if (fx.title) {
     title = preview ? "title_preview.ass" : "title.ass";
     fs.writeFileSync(path.join(jd, title), titleAss(fx, sub.font), "utf8");
   }
-  const filter = pictureFilter({
-    burn: opts.burn, sub, logo: logo ? parseLogo(opts.logo) : null, out: parseOut(opts.out), fx, title, duration,
-    logoInput: 3, ...(await probeSize(path.join(jd, path.basename(src)))), shift,
-    srt: opts.burn ? burnSrt(jd, sub, preview ? "burn_preview.srt" : "burn.srt") : undefined,
+  // inputs 0-2: the video, the sound, the subtitle track; then the logo and each sticker (an image, looped)
+  const inputs: string[] = [];
+  let next = 3;
+  const add = (args: string[]) => { inputs.push(...args); return next++; };
+  const logoInput = logo ? add(["-loop", "1", "-i", logo]) : 0;
+  const stickers = edit.stickers.flatMap((s) => {
+    const f = stickerPath(s.file);
+    if (!f || !fs.existsSync(f)) return [];
+    // an animated GIF keeps playing; other images are one picture repeated
+    return [{ ...s, input: add(/\.gif$/i.test(f) ? ["-ignore_loop", "0", "-i", f] : ["-loop", "1", "-i", f]) }];
   });
-  return { inputs: logo ? ["-loop", "1", "-i", logo] : [], filter };
+  const segsFile = path.join(jd, "segments.json");
+  const punch = fx.zoom === "punch" && fs.existsSync(segsFile) ? punchRanges(loadSegments(jd), duration) : [];
+  const size = await probeSize(path.join(jd, path.basename(src)));
+  const filter = pictureFilter({
+    burn, sub, logo: logo ? parseLogo(opts.logo) : null, out, fx, title, duration, logoInput, ...size, shift,
+    srt: burn ? burnSrt(jd, sub, preview ? "burn_preview.srt" : "burn.srt") : undefined,
+    stickers, punch, edit, force: timelineEdited(edit) || shift !== undefined,
+  });
+  return { inputs, filter, size: outSize(out, size.width, size.height), edit };
 }
 
-async function mux(jd: string, src: string, opts: Opts, duration: number, report: Report) {
-  const { inputs, filter } = await look(jd, src, opts, duration);
-  report("mux", 0, filter ? "Making the picture (subtitles, effects, format)" : "Building final video");
-  const ffmpeg = tool("ffmpeg");
-  const base = ["-y", "-v", "error", "-i", path.basename(src), "-i", "dub_audio.m4a", "-i", "km.srt", ...inputs];
-  const streams = ["-map", "1:a:0", "-map", "2:0"];
-  // fading to black fades the sound too, which means encoding it again (it is copied otherwise)
-  const audio = parseFx(opts.fx).fade && duration > 2
-    ? ["-af", `afade=t=in:d=0.6,afade=t=out:st=${(duration - 0.6).toFixed(3)}:d=0.6`, "-c:a", "aac", "-b:a", "192k"]
-    : ["-c:a", "copy"];
-  const tail = [...audio, "-c:s", "mov_text", "-metadata:s:s:0", "language=khm",
-    "-metadata:s:a:0", "language=khm", "-movflags", "+faststart", "output.mp4"];
+/** Whether a video file has a sound track. */
+async function hasAudio(file: string) {
+  const out = await run(tool("ffprobe"), ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", file])
+    .catch(() => Buffer.from(""));
+  return out.toString().trim().length > 0;
+}
+
+/**
+ * The exported video: picture (with every effect), the mixed sound and the Khmer subtitle track. With parts cut out
+ * or another speed the sound is cut and timed exactly like the picture; an intro / outro clip is fitted to the
+ * video's size and put before / after it. `file`, `shape`: one more shape of the same video.
+ */
+async function mux(jd: string, src: string, opts: Opts, duration: number, report: Report, file = "output.mp4", shape?: OutOpts) {
+  const o = shape ?? parseOut(opts.out), fx = parseFx(opts.fx);
+  const { inputs, filter, size, edit } = await look(jd, src, opts, duration, undefined, false, o);
+  const timeline = timelineEdited(edit), mainDur = outputDuration(edit, duration);
+  const intro = o.intro ? clipFile("intro") : null, outro = o.outro ? clipFile("outro") : null;
+  const introDur = intro ? await probeDuration(intro).catch(() => 0) : 0;
+  const outroDur = outro ? await probeDuration(outro).catch(() => 0) : 0;
+  const srt = exportSubs(jd, edit, introDur);
+  const subs = fs.existsSync(path.join(jd, srt));
+  const total = introDur + mainDur + outroDur;
+  const label = `${file === "output.mp4" ? "" : `${o.aspect} version: `}${filter || intro || outro ? "Making the picture" : "Building final video"}`;
+  report("mux", 0, label);
+
+  // the sound: cut and timed like the picture, faded with it
+  const { keep, shift } = cutExpressions(edit.cuts);
+  const fade = fx.fade && mainDur > 2 ? `afade=t=in:d=0.6,afade=t=out:st=${(mainDur - 0.6).toFixed(3)}:d=0.6` : "";
+  const sound = [
+    edit.cuts.length ? `aselect='${keep}',asetpts='PTS-(${shift})/TB',aresample=async=1:first_pts=0` : "",
+    atempo(edit.speed), fade,
+  ].filter(Boolean).join(",");
+
+  const base = ["-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", path.basename(src), "-i", "dub_audio.m4a",
+    ...(subs ? ["-i", srt] : ["-f", "lavfi", "-t", "1", "-i", "anullsrc"]), ...inputs];
+  const tail = [...(subs ? ["-map", "2:0", "-c:s", "mov_text", "-metadata:s:s:0", "language=khm"] : []),
+    "-metadata:s:a:0", "language=khm", "-movflags", "+faststart", file];
   // no -shortest: it also counts the subtitle track and would cut the video after the last line
-  const encode = ["-c:v", "libx264", "-preset", "veryfast", "-crf", String(CRF[parseOut(opts.out).quality]),
-    "-pix_fmt", "yuv420p"];
-  if (filter) {
-    await run(ffmpeg, [...base, "-filter_complex", filter, "-map", "[v]", ...streams, ...encode, ...tail], { cwd: jd });
+  const encode = ["-c:v", "libx264", "-preset", "veryfast", "-crf", String(CRF[o.quality]), "-pix_fmt", "yuv420p"];
+  const aac = ["-c:a", "aac", "-b:a", "192k"];
+  // filters go in files (ffmpeg's -/option file): hundreds of cuts would not fit on a Windows command line
+  const go = (args: string[]) => run(tool("ffmpeg"), args.flatMap((a, i) => {
+    if ((args[i - 1] === "-filter_complex" || args[i - 1] === "-af")) {
+      const name = `${args[i - 1].slice(1)}_${file.replace(".mp4", "")}.txt`;
+      fs.writeFileSync(path.join(jd, name), a, "utf8");
+      return [name];
+    }
+    return a === "-filter_complex" || a === "-af" ? [`-/${a.slice(1)}`] : [a];
+  }), {
+    cwd: jd, keepOutput: false,
+    onLine: (l) => {
+      const m = l.match(/^out_time_us=(\d+)/);
+      if (m && total > 0) report("mux", Math.min(1, +m[1] / 1e6 / total), label);
+    },
+  });
+
+  if (!filter && !intro && !outro) { // nothing changes the picture: copied as it is
+    const audio = sound ? ["-af", sound, ...aac] : ["-c:a", "copy"];
+    try {
+      await go([...base, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, ...tail]);
+    } catch { // source codec can't go into MP4 as-is
+      await go([...base, "-map", "0:v:0", "-map", "1:a:0", ...encode, ...audio, ...tail]);
+    }
     return;
   }
-  try {
-    await run(ffmpeg, [...base, "-map", "0:v:0", ...streams, "-c:v", "copy", ...tail], { cwd: jd });
-  } catch { // source codec can't go into MP4 as-is
-    await run(ffmpeg, [...base, "-map", "0:v:0", ...streams, ...encode, ...tail], { cwd: jd });
+  let graph = `${filter ?? "[0:v]format=yuv420p[v]"};[1:a]${sound || "anull"}[a]`;
+  if (intro || outro) { // every piece in the video's size and sound format, then one after the other
+    const { width: W, height: H } = size;
+    const fmt = `aformat=sample_fmts=fltp:sample_rates=${SR}:channel_layouts=stereo`;
+    let k = base.filter((x) => x === "-i").length; // index of the next input
+    const clip = async (f: string, dur: number, name: string) => {
+      base.push("-i", f);
+      const i = k++;
+      graph += `;[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,`
+        + `setsar=1,format=yuv420p[${name}v]`;
+      graph += (await hasAudio(f)) ? `;[${i}:a]${fmt}[${name}a]` // a clip without sound: silence as long as it
+        : `;anullsrc=r=${SR}:cl=stereo,atrim=0:${dur.toFixed(3)},${fmt}[${name}a]`;
+      return `[${name}v][${name}a]`;
+    };
+    const pieces: string[] = [];
+    if (intro) pieces.push(await clip(intro, introDur, "in"));
+    graph += `;[v]scale=${W}:${H},setsar=1[vm];[a]${fmt}[am]`;
+    pieces.push("[vm][am]");
+    if (outro) pieces.push(await clip(outro, outroDur, "out"));
+    graph += `;${pieces.join("")}concat=n=${pieces.length}:v=1:a=1[vc][ac]`;
+    await go([...base, "-filter_complex", graph, "-map", "[vc]", "-map", "[ac]", ...encode, ...aac, ...tail]);
+    return;
   }
+  await go([...base, "-filter_complex", graph, "-map", "[v]", "-map", "[a]", ...encode,
+    ...(sound ? aac : ["-c:a", "copy"]), ...tail]);
+}
+
+/** The same video in the other shapes asked for (output_9x16.mp4 …); shapes no longer wanted are removed. */
+async function moreShapes(jd: string, opts: Opts, meta: Meta, report: Report) {
+  const o = parseOut(opts.out), want = o.also.filter((a) => a !== o.aspect);
+  for (const a of SHAPES) if (!want.includes(a)) fs.rmSync(path.join(jd, shapeFile(a)), { force: true });
+  for (const a of want) await mux(jd, path.join(jd, meta.input), opts, meta.duration, report, shapeFile(a), { ...o, aspect: a });
 }
 
 /** Only the picture changed (subtitle style, logo): rebuild the video from the existing Khmer audio. */
 export async function render(jd: string, opts: Opts, meta: Meta, report: Report) {
   await mux(jd, path.join(jd, meta.input), opts, meta.duration, report);
+  await moreShapes(jd, opts, meta, report);
 }
 
 /** One frame at `t` seconds with the subtitles and logo exactly as the video will show them (PNG). */
@@ -1117,6 +1274,103 @@ export async function previewFrame(jd: string, opts: Opts, meta: Meta, t: number
   return run(tool("ffmpeg"), ["-v", "error", "-ss", t.toFixed(3), "-i", path.basename(src),
     "-f", "lavfi", "-i", "anullsrc", "-f", "lavfi", "-i", "anullsrc", ...inputs,
     "-filter_complex", filter!, "-map", "[v]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], { cwd: jd });
+}
+
+// ---------------------------------------------------------------- thumbnail
+
+export type ThumbOpts = {
+  t: number; text: string; color: string; outline: string; size: number; pos: "top" | "middle" | "bottom";
+  shape: "16:9" | "9:16"; logo: boolean; pop: boolean;
+};
+export function parseThumb(v: unknown): ThumbOpts {
+  const s = (v && typeof v === "object" ? v : {}) as Partial<Record<keyof ThumbOpts, unknown>>;
+  const hex = (x: unknown, d: string) => (typeof x === "string" && /^#[0-9a-f]{6}$/i.test(x) ? x : d);
+  return {
+    t: num(s.t, 0, 1e6, 0),
+    // into an .ass file: braces and backslashes would be read as commands; a new line is \N there
+    text: typeof s.text === "string" ? s.text.replace(/[{}\\]/g, "").slice(0, 120) : "",
+    color: hex(s.color, "#ffd400"), outline: hex(s.outline, "#000000"), size: num(s.size, 4, 30, 12),
+    pos: s.pos === "top" || s.pos === "middle" ? s.pos : "bottom", shape: s.shape === "9:16" ? "9:16" : "16:9",
+    logo: s.logo === true, pop: s.pop !== false,
+  };
+}
+
+/**
+ * A thumbnail for YouTube / Facebook: the frame at t, filled to 1280×720 (or 1080×1920), colours lifted, a big
+ * title in the subtitle font with a thick outline (libass shapes Khmer correctly), your logo in a corner.
+ * Saved as thumbnail.jpg; returns the JPG.
+ */
+export async function thumbnail(jd: string, opts: Opts, meta: Meta, th: ThumbOpts): Promise<Buffer> {
+  const [W, H] = th.shape === "9:16" ? [1080, 1920] : [1280, 720];
+  const sub = parseSubStyle(opts.sub);
+  const px = Math.round((H * th.size) / 100);
+  const assHex = (c: string) => `&H00${c.slice(5, 7)}${c.slice(3, 5)}${c.slice(1, 3)}`.toUpperCase();
+  const align = { top: 8, middle: 5, bottom: 2 }[th.pos];
+  fs.writeFileSync(path.join(jd, "thumb.ass"), ["[Script Info]", "ScriptType: v4.00+", `PlayResX: ${W}`, `PlayResY: ${H}`, "WrapStyle: 0", "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    `Style: T,${sub.font},${px},${assHex(th.color)},${assHex(th.color)},${assHex(th.outline)},&H96000000,-1,0,0,0,100,100,0,0,1,${Math.max(3, Math.round(px / 9))},${Math.round(px / 14)},${align},${Math.round(W * 0.05)},${Math.round(W * 0.05)},${Math.round(H * 0.06)},1`,
+    "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    `Dialogue: 0,0:00:00.00,0:00:10.00,T,,0,0,0,,${th.text.trim().replace(/\r?\n/g, "\\N")}`, ""].join("\n"), "utf8");
+  const fontsdir = path.relative(jd, FONTS_DIR).split(path.sep).join("/");
+  const logo = th.logo ? logoFile() : null;
+  const steps = [`[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1`
+    + `${th.pop ? ",eq=contrast=1.12:saturation=1.3:brightness=0.02,unsharp=5:5:0.8" : ""}`
+    + `${th.text.trim() ? `,subtitles=thumb.ass:fontsdir='${fontsdir}'` : ""}[b]`];
+  let last = "b";
+  if (logo) {
+    steps.push(`[1:v]scale=${Math.round(W * 0.14)}:-2[lg]`, `[b][lg]overlay=W-w-${Math.round(W * 0.03)}:${Math.round(W * 0.03)}[l]`);
+    last = "l";
+  }
+  steps.push(`[${last}]format=yuvj420p[v]`);
+  const t = Math.max(0, Math.min(meta.duration - 0.1, th.t));
+  const jpg = await run(tool("ffmpeg"), ["-v", "error", "-ss", t.toFixed(3), "-i", meta.input, ...(logo ? ["-i", logo] : []),
+    "-filter_complex", steps.join(";"), "-map", "[v]", "-frames:v", "1", "-q:v", "2", "-f", "image2pipe", "-c:v", "mjpeg", "-"], { cwd: jd });
+  fs.writeFileSync(path.join(jd, "thumbnail.jpg"), jpg);
+  return jpg;
+}
+
+// ---------------------------------------------------------------- silent parts
+
+/**
+ * Silent parts to cut out (jump cut): where the original sound stays below `db` for at least `min` seconds and
+ * nobody speaks (no line, no Khmer voice). A little of each silence is left at both ends, so speech is not clipped.
+ */
+export async function findSilences(jd: string, meta: Meta, min = 0.8, db = -35): Promise<Range[]> {
+  const PAD = 0.15;
+  let wav = path.join(jd, "audio16k.wav");
+  if (!fs.existsSync(wav)) {
+    await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, meta.input), "-vn", "-ac", "1", "-ar", "16000", wav]);
+  }
+  const quiet: Range[] = [];
+  let from = -1;
+  await run(tool("ffmpeg"), ["-v", "info", "-nostats", "-i", wav, "-af", `silencedetect=noise=${db}dB:d=${min}`, "-f", "null", "-"], {
+    keepOutput: false,
+    onLine: (l) => {
+      const a = l.match(/silence_start: ([\d.]+)/), b = l.match(/silence_end: ([\d.]+)/);
+      if (a) from = +a[1];
+      if (b && from >= 0) { quiet.push({ from, to: +b[1] }); from = -1; }
+    },
+  });
+  if (from >= 0) quiet.push({ from, to: meta.duration }); // silent until the end
+  // speech: the lines, and the Khmer voice where it runs on after a line
+  const speech: Range[] = [];
+  if (fs.existsSync(path.join(jd, "segments.json"))) speech.push(...loadSegments(jd).map((s) => ({ from: s.start, to: s.end })));
+  const subsFile = path.join(jd, "subs.json");
+  if (fs.existsSync(subsFile)) {
+    speech.push(...(JSON.parse(fs.readFileSync(subsFile, "utf8")) as Sub[]).map((s) => ({ from: s[0], to: s[4] ?? s[1] })));
+  }
+  const talk = mergeRanges(speech);
+  const out: Range[] = [];
+  for (const q of quiet) {
+    let parts: Range[] = [{ from: q.from + PAD, to: Math.min(q.to, meta.duration) - PAD }];
+    for (const s of talk) { // what is left of the silence outside the speech
+      parts = parts.flatMap((p) => (s.to <= p.from || s.from >= p.to ? [p]
+        : [{ from: p.from, to: s.from - PAD }, { from: s.to + PAD, to: p.to }]));
+    }
+    out.push(...parts.filter((p) => p.to - p.from >= min));
+  }
+  return mergeRanges(out);
 }
 
 /** Makes the voices and the layers; returns a warning when some lines could not be voiced. */
@@ -1187,15 +1441,17 @@ export async function separateVoices(jd: string, meta: Meta, report: Report) {
 
 /** Export: merge every layer, with the settings chosen in the editor, into one video. */
 export async function remix(jd: string, opts: Opts, meta: Meta, report: Report) {
-  if (!fs.existsSync(path.join(jd, "tts"))) throw new Error("Generate the Khmer voice first");
-  await finish(jd, loadSegments(jd), opts, meta, report);
+  if (!editOnly(opts) && !fs.existsSync(path.join(jd, "tts"))) throw new Error("Generate the Khmer voice first");
+  await finish(jd, editOnly(opts) ? [] : loadSegments(jd), opts, meta, report);
 }
 
 async function finish(jd: string, segs: Segment[], opts: Opts, meta: Meta, report: Report) {
   const src = path.join(jd, meta.input);
-  const clips = await layers(jd, segs, opts, meta, report);
+  // a project only edited: no voice layers, the mix is the video's own sound (levels, noise reduction, music)
+  const clips = editOnly(opts) ? [] : await layers(jd, segs, opts, meta, report);
   await mix(jd, src, segs, clips, meta.duration, opts, report);
   await mux(jd, src, opts, meta.duration, report);
+  await moreShapes(jd, opts, meta, report);
 }
 
 /** Khmer subtitles follow the dubbed speech, held until the original line ends. */
@@ -1209,6 +1465,6 @@ function timedSubs(segs: Segment[], clips: Clip[], duration: number): Sub[] {
       const p = placed.get(j);
       if (p) { nxt = p[0]; break; }
     }
-    return [a, Math.min(Math.max(b, s.end, a + 1), Math.max(nxt - 0.02, b)), s.km, s.text];
+    return [a, Math.min(Math.max(b, s.end, a + 1), Math.max(nxt - 0.02, b)), s.km, s.text, b];
   });
 }

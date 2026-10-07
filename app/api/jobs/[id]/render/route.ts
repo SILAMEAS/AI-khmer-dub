@@ -1,14 +1,15 @@
 import { fs, path } from "@/lib/rt";
 import { parseFx, parseLogo, parseOut, parseSubStyle } from "@/lib/branding";
+import { parseEdit } from "@/lib/edit";
 import { jobDir, jobs, startRender } from "@/lib/jobs";
-import { parseMix } from "@/lib/pipeline";
+import { editOnly, parseMix } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * New subtitle style, logo or format for a finished dub: only the video picture is rebuilt (no new voices).
- * New sound levels (mix, bgMode) also mix the existing Khmer lines again.
+ * New subtitle style, logo, format or edits for a finished project: only the video picture is rebuilt (no new
+ * voices). New sound levels (mix, bgMode) also mix the existing Khmer lines again.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const job = jobs.get((await params).id);
@@ -16,12 +17,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (job.status === "queued" || job.status === "running") {
     return Response.json({ detail: "Job is still running" }, { status: 409 });
   }
-  const b: { burn?: boolean; sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; mix?: unknown; bgMode?: string } =
+  const b: { burn?: boolean; sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; mix?: unknown; bgMode?: string; edit?: unknown } =
     await req.json();
-  const sound = !!(b.mix || b.bgMode);
-  // export (with the sound) needs the Khmer voice track; the picture alone needs a mix made before
-  const needs = sound ? "voice_track.m4a" : "dub_audio.m4a";
-  if (!job.meta || !fs.existsSync(path.join(jobDir(job.id), needs))) {
+  // a project only edited always mixes its own sound; a dub needs its Khmer voice track (or a mix made before)
+  const sound = editOnly(job.opts) || !!(b.mix || b.bgMode);
+  const needs = editOnly(job.opts) ? null : sound ? "voice_track.m4a" : "dub_audio.m4a";
+  if (!job.meta || (needs && !fs.existsSync(path.join(jobDir(job.id), needs)))) {
     return Response.json({ detail: "Generate the Khmer voice first" }, { status: 409 });
   }
   if (typeof b.burn === "boolean") job.opts.burn = b.burn;
@@ -30,6 +31,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (b.out) job.opts.out = parseOut(b.out);
   if (b.fx) job.opts.fx = parseFx(b.fx);
   if (b.mix) job.opts.mix = parseMix(b.mix);
+  if (b.edit) job.opts.edit = parseEdit(b.edit);
   if (b.bgMode) job.opts.bgMode = b.bgMode === "none" ? "none" : "duck";
   startRender(job, sound);
   return Response.json(job);

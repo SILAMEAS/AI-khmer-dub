@@ -11,13 +11,16 @@ export type SubStyle = {
   color: string; outline: string; outlineWidth: number;
   box: boolean; boxColor: string; boxOpacity: number;
   position: "bottom" | "top"; margin: number; bilingual: boolean; anim: "none" | "fade" | "pop";
+  karaoke: boolean; hiColor: string;
 };
 export type LogoOpts = {
   enabled: boolean; size: number; every: number; duration: number; position: "top" | "bottom"; opacity: number;
 };
+export type Shape = "16:9" | "9:16" | "1:1" | "4:5";
 export type OutOpts = {
-  aspect: "original" | "16:9" | "9:16" | "1:1" | "4:5"; fit: "blur" | "crop" | "bars";
+  aspect: "original" | Shape; fit: "blur" | "crop" | "bars";
   size: 0 | 480 | 720 | 1080; quality: "high" | "standard" | "small";
+  intro: boolean; outro: boolean; also: Shape[];
 };
 export type FxOpts = {
   cover: boolean; coverY: number; coverH: number; coverMode: "blur" | "box"; coverColor: string;
@@ -25,6 +28,7 @@ export type FxOpts = {
   brightness: number; contrast: number; saturation: number; sharpen: boolean;
   mirror: boolean; fade: boolean; progress: boolean; progressColor: string;
   title: string; titlePos: "tl" | "tc" | "tr" | "bl" | "br"; titleSize: number; titleColor: string;
+  zoom: "none" | "slow" | "punch";
 };
 export type Look = { burn: boolean; sub: SubStyle; logo: LogoOpts; out: OutOpts; fx: FxOpts };
 export type LookProps = { value: Look; onChange: (l: Look) => void };
@@ -32,14 +36,15 @@ export type LookProps = { value: Look; onChange: (l: Look) => void };
 export const DEFAULT_LOOK: Look = {
   burn: false,
   sub: { font: "Khmer UI", size: 20, bold: false, color: "#ffffff", outline: "#000000", outlineWidth: 2,
-    box: false, boxColor: "#000000", boxOpacity: 0.6, position: "bottom", margin: 28, bilingual: false, anim: "none" },
+    box: false, boxColor: "#000000", boxOpacity: 0.6, position: "bottom", margin: 28, bilingual: false, anim: "none",
+    karaoke: false, hiColor: "#ffd400" },
   logo: { enabled: false, size: 12, every: 60, duration: 10, position: "top", opacity: 0.9 },
-  out: { aspect: "original", fit: "blur", size: 0, quality: "standard" },
+  out: { aspect: "original", fit: "blur", size: 0, quality: "standard", intro: false, outro: false, also: [] },
   fx: {
     cover: false, coverY: 78, coverH: 14, coverMode: "blur", coverColor: "#000000",
     filter: "none", brightness: 0, contrast: 0, saturation: 0, sharpen: false,
     mirror: false, fade: false, progress: false, progressColor: "#ff3b5c",
-    title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff",
+    title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff", zoom: "none",
   },
 };
 
@@ -198,6 +203,9 @@ export function SubtitleStylePanel({ value, onChange, brand, reload }: LookProps
           </label>
           <label className="check inline"><input type="checkbox" checked={s.bilingual} onChange={(e) => setSub({ bilingual: e.target.checked })} />
             <span>Khmer + original<small>Original line under it, smaller</small></span></label>
+          <label className="check inline"><input type="checkbox" checked={s.karaoke} onChange={(e) => setSub({ karaoke: e.target.checked })} />
+            <span>Karaoke<small>The word being said lights up</small></span></label>
+          {s.karaoke && <label>Highlight <input type="color" value={s.hiColor} onChange={(e) => setSub({ hiColor: e.target.value })} /></label>}
         </div>
       </fieldset>
       {err && <div className="err">{err}</div>}
@@ -307,6 +315,14 @@ export function ExtrasPanel({ value, onChange }: LookProps) {
       <Item k="fade" name="Fade in & out" hint="From black at the start, to black at the end (sound too)" />
       <Item k="progress" name="Progress bar" hint="A thin bar along the bottom that fills as the video plays" />
       {fx.progress && <label className="row nowrap">Bar colour <input type="color" value={fx.progressColor} onChange={(e) => setFx({ progressColor: e.target.value })} /></label>}
+      <label className="f">Zoom</label>
+      <div className="seg-btns">
+        {([["none", "None"], ["slow", "Slow zoom"], ["punch", "Punch-in"]] as const).map(([v, n]) => (
+          <button type="button" key={v} className={fx.zoom === v ? "on" : ""} onClick={() => setFx({ zoom: v })}>{n}</button>
+        ))}
+      </div>
+      <Hint>{fx.zoom === "slow" ? "Ken Burns: the picture slowly zooms in and out (every 12 s)." : fx.zoom === "punch"
+        ? "Every other line zooms in a little, like TikTok talking videos." : "Movement for still or calm shots."}</Hint>
     </div>
   );
 }
@@ -398,6 +414,53 @@ export function FormatPanel({ value, onChange }: LookProps) {
         ))}
       </div>
       <Hint>Never enlarged above the source. “Small file” is handy for Telegram.</Hint>
+      <label className="f">Also make</label>
+      <div className="chips">
+        {ASPECTS.filter(([v]) => v !== "original" && v !== out.aspect).map(([v, name, sub]) => {
+          const on = out.also.includes(v as Shape);
+          return (
+            <button type="button" key={v} className={`chip ${on ? "on" : ""}`} title={sub}
+              onClick={() => setOut({ also: on ? out.also.filter((a) => a !== v) : [...out.also, v as Shape] })}>{on ? "✓ " : ""}{name}</button>
+          );
+        })}
+      </div>
+      <Hint>Every shape in one export – e.g. 16:9 for YouTube and 9:16 for TikTok from the same edit.</Hint>
+      <label className="f">Intro and outro</label>
+      <ClipRow kind="intro" on={out.intro} onToggle={(v) => setOut({ intro: v })} />
+      <ClipRow kind="outro" on={out.outro} onToggle={(v) => setOut({ outro: v })} />
+    </div>
+  );
+}
+
+/** Your channel's intro or end clip: upload once, then on or off per video. */
+function ClipRow({ kind, on, onToggle }: { kind: "intro" | "outro"; on: boolean; onToggle: (v: boolean) => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(""), [err, setErr] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+  const load = useCallback(() => fetch("/api/branding/clips").then((r) => r.json()).then((c) => setUrl(c[kind]?.url ?? null)).catch(() => {}), [kind]);
+  useEffect(() => { load(); }, [load]);
+  async function pick(f?: File) {
+    if (!f) return;
+    setErr(""); setBusy("Uploading…");
+    try {
+      const r = await fetch(`/api/branding/clips?kind=${kind}&name=${encodeURIComponent(f.name)}`, { method: "POST", body: f });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      await load(); onToggle(true);
+    } catch (e) { setErr((e as Error).message); } finally { setBusy(""); }
+  }
+  async function remove() { await fetch(`/api/branding/clips?kind=${kind}`, { method: "DELETE" }); onToggle(false); load(); }
+  const name = kind === "intro" ? "Intro (before the video)" : "Outro (after the video)";
+  return (
+    <div className="clip-row">
+      <label className="check"><input type="checkbox" checked={on && !!url} disabled={!url} onChange={(e) => onToggle(e.target.checked)} />
+        <span>{name}<small>{busy || (url ? "Fitted to the video's shape" : "No clip yet")}</small></span></label>
+      <div className="row nowrap">
+        {url && <a className="btn ghost sm" href={url} target="_blank" rel="noreferrer">▶</a>}
+        <button type="button" className="btn ghost sm" onClick={() => input.current?.click()}>{url ? "Replace" : "Upload"}</button>
+        {url && <button type="button" className="btn ghost sm" onClick={remove}>✕</button>}
+      </div>
+      <input ref={input} type="file" accept="video/*" hidden onChange={(e) => pick(e.target.files?.[0])} />
+      {err && <div className="err">{err}</div>}
     </div>
   );
 }

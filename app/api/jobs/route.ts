@@ -50,6 +50,8 @@ export async function POST(req: Request) {
     out: parseOut(obj(p.out)),
     fx: parseFx(obj(p.fx)),
     mix: parseMix(obj(p.mix)),
+    mode: p.mode === "edit" ? "edit" : "dub", // edit: no voices, straight to the editor
+    autoExport: String(p.autoExport) === "true", // batch: all the way to the exported video
     ...(trim && { trim }),
   };
 

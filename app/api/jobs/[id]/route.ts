@@ -1,6 +1,7 @@
 import { fs, path } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
 import { stemsReady } from "@/lib/clone";
+import { shapeFile, SHAPES } from "@/lib/branding";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,7 @@ export async function GET(_req: Request, { params }: Ctx) {
   const has = (f: string) => fs.existsSync(path.join(jobDir(job.id), f));
   return Response.json({ ...job, tracks: {
     voice: has("voice_track.m4a"), vocals: !!job.meta && stemsReady(jobDir(job.id), job.meta.duration), output: has("output.mp4"),
+    shapes: SHAPES.filter((a) => has(shapeFile(a))), thumbnail: has("thumbnail.jpg"),
   } });
 }
 

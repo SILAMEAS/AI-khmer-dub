@@ -6,8 +6,13 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  api, clock, DEFAULT_MIX, fullMix, parseTime, uploadFile, type Job, type Mix, type Segment, type Voice, type VoiceChoice,
+  api, clock, DEFAULT_EDIT, DEFAULT_MIX, fullEdit, fullMix, parseTime, uploadFile, type EditOpts, type Job, type Mix,
+  type Segment, type Voice, type VoiceChoice,
 } from "./editor/common";
+import {
+  addCuts, Batch, CutList, DEFAULT_THUMB, EditPanel, Glossary, StickerLibrary, StickerSettings, ThumbnailMaker, ThumbnailStyle,
+  TimeField, type Marks, type Thumb,
+} from "./editor/tools";
 import {
   AdjustPanel, CoverPanel, DEFAULT_LOOK, ExtrasPanel, FilterGallery, FormatPanel, fullLook, LogoPanel, rememberLook, savedLook,
   SubtitleStylePanel, TitlePanel, useBranding, type Look,
@@ -17,17 +22,20 @@ import { Player } from "./editor/Player";
 import { Timeline } from "./editor/Timeline";
 import { LinkBox } from "./editor/link";
 
-type Tab = "media" | "voice" | "captions" | "text" | "filters" | "effects" | "audio" | "logo" | "export";
+type Tab = "media" | "edit" | "voice" | "captions" | "text" | "stickers" | "filters" | "effects" | "audio" | "logo" | "thumb" | "export";
 const TABS: [Tab, string, string][] = [
-  ["media", "📁", "Media"], ["voice", "🗣", "Voice"], ["captions", "💬", "Captions"], ["text", "T", "Text"],
-  ["filters", "🎨", "Filters"], ["effects", "✨", "Effects"], ["audio", "🎵", "Audio"], ["logo", "🏷", "Logo"], ["export", "⬆", "Export"],
+  ["media", "📁", "Media"], ["edit", "✂", "Edit"], ["voice", "🗣", "Voice"], ["captions", "💬", "Captions"], ["text", "T", "Text"],
+  ["stickers", "😀", "Stickers"], ["filters", "🎨", "Filters"], ["effects", "✨", "Effects"], ["audio", "🎵", "Audio"],
+  ["logo", "🏷", "Logo"], ["thumb", "📸", "Thumbnail"], ["export", "⬆", "Export"],
 ];
+/** Tabs about the voice and subtitles: not for a project that is only edited. */
+const DUB_TABS: Tab[] = ["voice", "captions"];
 const STEPS: [string, string][] = [
   ["download", "Download"], ["extract", "Audio"], ["transcribe", "Speech→text"], ["separate", "Voices/music"], ["analyze", "Speakers"],
   ["translate", "Translate"], ["review", "Review"], ["tts", "Khmer voice"], ["clone", "Clone voices"], ["mix", "Mix"], ["mux", "Video"], ["done", "Done"],
 ];
 const DOWNLOADS: [string, string, string][] = [
-  ["output.mp4", "🎬 Khmer video", "MP4 + subtitle track"],
+  ["output.mp4", "🎬 Video", "MP4 + subtitle track"],
   ["km.srt", "📝 Khmer subtitles", ".srt"],
   ["bilingual.srt", "📝 Khmer + original", ".srt"],
   ["original.srt", "📝 Original subtitles", ".srt"],
@@ -65,14 +73,6 @@ function VoiceCard({ v, on, onPick, rate, off }: { v: VoiceChoice; on: boolean; 
   );
 }
 
-/** A time field (1:23.4) that is taken when you leave it. */
-function TimeField({ value, onChange, placeholder }: { value: number; onChange: (t: number) => void; placeholder?: string }) {
-  const [s, setS] = useState(value ? clock(value, true) : "");
-  useEffect(() => setS(value ? clock(value, true) : ""), [value]);
-  return <input type="text" className="time-field" value={s} placeholder={placeholder} onChange={(e) => setS(e.target.value)}
-    onBlur={() => { const t = parseTime(s); if (Number.isNaN(t)) setS(value ? clock(value, true) : ""); else onChange(t); }} />;
-}
-
 export default function Studio() {
   // ---------------------------------------------------------------- project and job
   const [jobId, setJobId] = useState<string | null>(null);
@@ -81,8 +81,9 @@ export default function Studio() {
   const [history, setHistory] = useState<Job[]>([]);
   const [canClone, setCanClone] = useState(false);
 
-  // new project: the video to dub
-  const [mode, setMode] = useState<"file" | "url">("file");
+  // new project: the video to dub (or only to edit), from a file, a link or many at once
+  const [mode, setMode] = useState<"file" | "url" | "batch">("file");
+  const [projectMode, setProjectMode] = useState<"dub" | "edit">("dub");
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [url, setUrl] = useState("");
@@ -102,6 +103,12 @@ export default function Studio() {
   const [bgMode, setBgMode] = useState<"duck" | "none">("duck");
   const [look, setLook] = useState<Look>(DEFAULT_LOOK);
   const [mix, setMix] = useState<Mix>(DEFAULT_MIX);
+  // this video's edits: parts cut out, speed, stickers (per project, never carried to the next one)
+  const [edit, setEdit] = useState<EditOpts>(DEFAULT_EDIT);
+  const [marks, setMarks] = useState<Marks>({ in: null, out: null });
+  const [selectedCut, setSelectedCut] = useState<number | null>(null);
+  const [selectedSticker, setSelectedSticker] = useState<string | null>(null);
+  const [thumb, setThumb] = useState<Thumb>(DEFAULT_THUMB);
 
   // lines
   const [segs, setSegs] = useState<Segment[] | null>(null);
@@ -155,6 +162,7 @@ export default function Studio() {
   const loadHistory = useCallback(() => { api<Job[]>("/api/jobs").then(setHistory).catch(() => {}); }, []);
   const openJob = useCallback((id: string | null) => {
     setJobId(id); setJob(null); setSegs(null); setBaseSegs(null); setSelected(null); setSelectedPart(null);
+    setEdit(DEFAULT_EDIT); setMarks({ in: null, out: null }); setSelectedCut(null); setSelectedSticker(null);
     setView("edit"); setTime(0); setPollKey((k) => k + 1); setErr("");
     try { id ? localStorage.setItem("khmerDubJob", id) : localStorage.removeItem("khmerDubJob"); } catch {}
   }, []);
@@ -220,7 +228,7 @@ export default function Studio() {
     const first = synced !== job.id;
     if (first) {
       setVoice(job.opts.voice); setMatch(job.opts.match !== false); setRate(job.opts.rate ?? 0); setBgMode(job.opts.bgMode);
-      setLook(fullLook(job.opts)); setMix(fullMix(job.opts.mix));
+      setLook(fullLook(job.opts)); setMix(fullMix(job.opts.mix)); setEdit(fullEdit(job.opts.edit));
       setSynced(job.id);
     }
     api<Segment[]>(`/api/jobs/${job.id}/segments`).then((saved) => {
@@ -249,8 +257,9 @@ export default function Studio() {
   const stemsWanted = (clone || mix.split) && bgMode === "duck";
   const voicesChanged = !!job && job.status === "done" && (edited.size > 0 || voice !== job.opts.voice
     || match !== (job.opts.match !== false) || rate !== (job.opts.rate ?? 0));
-  const settingsNow = JSON.stringify([look, mix, bgMode]);
-  const settingsJob = job ? JSON.stringify([fullLook(job.opts), fullMix(job.opts.mix), job.opts.bgMode]) : "";
+  const settingsNow = JSON.stringify([look, mix, bgMode, edit]);
+  const settingsJob = job ? JSON.stringify([fullLook(job.opts), fullMix(job.opts.mix), job.opts.bgMode, fullEdit(job.opts.edit)]) : "";
+  const editOnly = job?.opts.mode === "edit";
   const exportCurrent = !!job?.tracks?.output && job.exported === job.version && !voicesChanged && settingsNow === settingsJob;
   const working = job?.status === "queued" || job?.status === "running";
 
@@ -269,14 +278,22 @@ export default function Studio() {
   }, [job?.id, job?.status, job?.task, job?.tracks?.vocals, stemsWanted, canClone, ready, synced, separateNow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- actions
-  const settingsBody = () => ({ voice, match, rate, bgMode, mix, ...look });
+  const settingsBody = () => ({ voice, match, rate, bgMode, mix, edit, ...look });
+
+  /** Settings of a new project, as sent with it (also for each project of a batch). */
+  const newParams = (withTrim = true): Record<string, string> => ({
+    sourceLang, quality, voice, match: String(match), rate: String(rate), bgMode, review: String(review), mode: projectMode,
+    burn: String(look.burn), sub: JSON.stringify(look.sub), logo: JSON.stringify(look.logo), out: JSON.stringify(look.out),
+    fx: JSON.stringify(look.fx),
+    // only edited: the video's own sound at full level (nothing to remove for a Khmer voice)
+    mix: JSON.stringify(projectMode === "edit" ? { ...mix, music: 100, split: false } : mix),
+    ...(withTrim && { trim: JSON.stringify(trim) }),
+  });
 
   async function start() {
     setErr("");
     if (trim.to && trim.to <= trim.from + 0.5) { setErr("The end of the cut must be after its start"); return; }
-    const params = { sourceLang, quality, voice, match: String(match), rate: String(rate), bgMode, review: String(review),
-      burn: String(look.burn), sub: JSON.stringify(look.sub), logo: JSON.stringify(look.logo), out: JSON.stringify(look.out),
-      fx: JSON.stringify(look.fx), mix: JSON.stringify(mix), trim: JSON.stringify(trim) };
+    const params = newParams();
     setBusy(true);
     try {
       let j: Job;
@@ -325,7 +342,7 @@ export default function Studio() {
     videoRef.current?.pause();
     try {
       await api(`/api/jobs/${jobId}/render`, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...look, mix, bgMode }) });
+        body: JSON.stringify({ ...look, mix, bgMode, edit }) });
       setPollKey((k) => k + 1);
     } catch (e) { alert((e as Error).message); }
   }
@@ -374,18 +391,79 @@ export default function Studio() {
     setDuration(d);
     if (startAt.current !== null && videoRef.current) { videoRef.current.currentTime = startAt.current; startAt.current = null; }
   }, []);
-  useEffect(() => { // space: play / pause
-    const key = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (e.code !== "Space" || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(tag)) return;
+  // ---------------------------------------------------------------- undo / redo
+  // Every change to the lines, look, sound or edits is a step; quick changes in a row (typing, dragging a slider)
+  // count as one. A project's history starts when it is opened.
+  type Snap = { segs: Segment[] | null; look: Look; mix: Mix; edit: EditOpts };
+  const hist = useRef<{ past: Snap[]; future: Snap[]; last: Snap | null; at: number; restoring: boolean; key: string }>(
+    { past: [], future: [], last: null, at: 0, restoring: false, key: "" });
+  const [, setHistTick] = useState(0);
+  useEffect(() => {
+    const h = hist.current, now: Snap = { segs, look, mix, edit };
+    const key = `${jobId}:${synced}`;
+    // a project opened, or its lines just arrived from the server: that is where its history starts
+    if (h.key !== key || !h.last || (!h.last.segs && segs)) {
+      Object.assign(h, { past: [], future: [], last: now, key, restoring: false }); setHistTick((n) => n + 1); return;
+    }
+    if (h.restoring) { h.restoring = false; h.last = now; return; }
+    if (Date.now() - h.at > 700) { h.past.push(h.last); if (h.past.length > 100) h.past.shift(); }
+    h.at = Date.now(); h.last = now; h.future = [];
+    setHistTick((n) => n + 1);
+  }, [segs, look, mix, edit, jobId, synced]);
+  const restore = (s: Snap) => { hist.current.restoring = true; setSegs(s.segs); setLook(s.look); setMix(s.mix); setEdit(s.edit); setHistTick((n) => n + 1); };
+  const undo = () => {
+    const h = hist.current;
+    if (!h.past.length || !h.last) return;
+    h.future.push(h.last); h.at = 0;
+    restore(h.past.pop()!);
+  };
+  const redo = () => {
+    const h = hist.current;
+    if (!h.future.length || !h.last) return;
+    h.past.push(h.last); h.at = 0;
+    restore(h.future.pop()!);
+  };
+
+  /** Cut out the part between the In and Out marks (ripple delete). */
+  const cutMarked = () => {
+    if (marks.in === null || marks.out === null || marks.out <= marks.in + 0.05) return false;
+    setEdit((e) => addCuts(e, [{ from: marks.in!, to: marks.out! }]));
+    setMarks({ in: null, out: null });
+    return true;
+  };
+
+  // keys: space play / pause, I / O mark, Delete cut out (or put the selected cut back / remove the selected sticker),
+  // Ctrl+Z / Ctrl+Y undo / redo - not while typing in a field (it has its own undo)
+  const keys = useRef<(e: KeyboardEvent) => void>(() => {});
+  keys.current = (e: KeyboardEvent) => {
+    const tag = (e.target as HTMLElement).tagName;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+    const el = videoRef.current;
+    const k = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "y")) {
       e.preventDefault();
-      const el = videoRef.current;
-      if (!el) return;
+      if (k === "y" || e.shiftKey) redo(); else undo();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey || tag === "BUTTON" && e.code === "Space") return;
+    if (e.code === "Space" && el) {
+      e.preventDefault();
       if (el.paused) { audio.start(); el.play().catch(() => {}); } else el.pause();
-    };
+    } else if (k === "i" && el) setMarks((m) => ({ ...m, in: el.currentTime }));
+    else if (k === "o" && el) setMarks((m) => ({ ...m, out: el.currentTime }));
+    else if (e.key === "Delete" || e.key === "Backspace") {
+      if (cutMarked()) { e.preventDefault(); return; }
+      if (selectedSticker) { setEdit((x) => ({ ...x, stickers: x.stickers.filter((s) => s.id !== selectedSticker) })); setSelectedSticker(null); }
+      else if (selectedCut !== null) { setEdit((x) => ({ ...x, cuts: x.cuts.filter((_, i) => i !== selectedCut) })); setSelectedCut(null); }
+      else return;
+      e.preventDefault();
+    }
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => keys.current(e);
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [audio]);
+  }, []);
 
   // ---------------------------------------------------------------- lines
   const speakers = clone ? job?.meta?.speakers ?? 0 : 0;
@@ -442,16 +520,26 @@ export default function Studio() {
           {job ? (
             <div className="project-card">
               <b>{job.meta?.title || job.title}</b>
-              <small>{job.meta ? `${clock(job.meta.duration)} · ${job.meta.language} · ${job.meta.segments} lines${job.meta.captions ? " · from subtitles" : ""}` : job.message}</small>
+              <small>{!job.meta ? job.message : editOnly ? `${clock(job.meta.duration)} · ✂ edit only`
+                : `${clock(job.meta.duration)} · ${job.meta.language} · ${job.meta.segments} lines${job.meta.captions ? " · from subtitles" : ""}`}</small>
               <button type="button" className="btn ghost sm" onClick={() => openJob(null)}>+ New project</button>
             </div>
           ) : (
             <>
+              <div className="seg-btns big">
+                <button type="button" className={projectMode === "dub" ? "on" : ""} onClick={() => setProjectMode("dub")}>🎙 Dub to Khmer</button>
+                <button type="button" className={projectMode === "edit" ? "on" : ""} onClick={() => setProjectMode("edit")}>✂ Edit only</button>
+              </div>
+              <small className="note">{projectMode === "dub" ? "Speech recognised, translated and voiced in Khmer – then edit."
+                : "Like CapCut: cut, speed, effects, text, stickers, sound and export – the video keeps its own sound."}</small>
               <div className="seg-btns">
                 <button type="button" className={mode === "file" ? "on" : ""} onClick={() => setMode("file")}>Upload file</button>
                 <button type="button" className={mode === "url" ? "on" : ""} onClick={() => setMode("url")}>Video link</button>
+                <button type="button" className={mode === "batch" ? "on" : ""} onClick={() => setMode("batch")} title="Many videos one after the other">Batch</button>
               </div>
-              {mode === "file" ? (
+              {mode === "batch" ? (
+                <Batch params={newParams(false)} onDone={() => loadHistory()} />
+              ) : mode === "file" ? (
                 <button type="button" className="import" onClick={() => fileInput.current?.click()}>
                   {file ? <><b>{file.name}</b><small>{(file.size / 1048576).toFixed(1)} MB · click to change</small></> : <><b>＋ Import video</b><small>MP4, MKV, MOV, AVI, WEBM…</small></>}
                 </button>
@@ -459,16 +547,20 @@ export default function Studio() {
                 <LinkBox value={url} onChange={setUrl} size={look.out.size || 1080} />
               )}
               <input ref={fileInput} type="file" accept="video/*,.mkv,.ts" hidden onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])} />
-              <label className="f">Original language</label>
-              <select value={sourceLang} onChange={(e) => setSourceLang(e.target.value)}>
-                <option value="auto">Auto detect</option><option value="zh">Chinese 中文</option><option value="en">English</option>
-              </select>
-              <label className="f">Recognition quality</label>
-              <select value={quality} onChange={(e) => setQuality(e.target.value)}>
-                <option value="best">Best (large-v3-turbo)</option><option value="balanced">Balanced (medium)</option><option value="fast">Fast (small)</option>
-              </select>
-              <label className="check"><input type="checkbox" checked={review} onChange={(e) => setReview(e.target.checked)} />
-                <span>Check the translation first<small>Stop before the voices are made</small></span></label>
+              {projectMode === "dub" && (
+                <>
+                  <label className="f">Original language</label>
+                  <select value={sourceLang} onChange={(e) => setSourceLang(e.target.value)}>
+                    <option value="auto">Auto detect</option><option value="zh">Chinese 中文</option><option value="en">English</option>
+                  </select>
+                  <label className="f">Recognition quality</label>
+                  <select value={quality} onChange={(e) => setQuality(e.target.value)}>
+                    <option value="best">Best (large-v3-turbo)</option><option value="balanced">Balanced (medium)</option><option value="fast">Fast (small)</option>
+                  </select>
+                  {mode !== "batch" && <label className="check"><input type="checkbox" checked={review} onChange={(e) => setReview(e.target.checked)} />
+                    <span>Check the translation first<small>Stop before the voices are made</small></span></label>}
+                </>
+              )}
             </>
           )}
           <h4>Projects</h4>
@@ -486,7 +578,18 @@ export default function Studio() {
           </div>
         </div>
       );
-      case "voice": return (
+      case "edit": return (
+        <EditPanel value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0} marks={marks} onMarks={setMarks}
+          segs={segs} jobId={job?.meta ? job.id : undefined} />
+      );
+      case "stickers": return (
+        <StickerLibrary value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0}
+          onSelect={(id) => { setSelectedSticker(id); }} />
+      );
+      case "thumb": return <ThumbnailStyle value={thumb} onChange={setThumb} hasLogo={!!brand?.logo} />;
+      case "voice": return editOnly ? (
+        <div className="pane"><small className="note">This project is only edited – it has no Khmer voice. To dub a video, start a new project with 🎙 Dub to Khmer.</small></div>
+      ) : (
         <div className="pane">
           <div className="voices col">
             {(["clone", "auto", "male", "female"] as const).map((c) => (
@@ -514,7 +617,9 @@ export default function Studio() {
       );
       case "captions": return (
         <div className="pane fill">
-          {!segs ? <small className="note">The lines appear here once the speech is recognised. Style them on the right – the player shows a sample.</small> : (
+          {editOnly ? <small className="note">This project is only edited, so it has no subtitles. Use T Text for words on the picture.</small>
+          : !segs ? <><small className="note">The lines appear here once the speech is recognised. Style them on the right – the player shows a sample.</small>
+            <Glossary segs={null} onSegs={() => {}} /></> : (
             <>
               <div className="findbar">
                 <input type="text" className="km" value={find} placeholder="Find in Khmer…" onChange={(e) => setFind(e.target.value)} />
@@ -523,6 +628,7 @@ export default function Studio() {
                   <button type="button" className="btn ghost sm" disabled={!hits}
                     onClick={() => setSegs(segs.map((x) => ({ ...x, km: x.km.split(find).join(replaceWith) })))}>All ({hits})</button>
                 </div>
+                <Glossary segs={segs} onSegs={setSegs} />
               </div>
               <div className="cap-list" ref={listRef}>
                 {segs.map((s, i) => (
@@ -555,7 +661,7 @@ export default function Studio() {
         <div className="pane">
           <h4>Progress</h4>
           <div className="steps">
-            {STEPS.filter(([k]) => k !== "download" || job.opts.url).map(([k, label]) => {
+            {STEPS.filter(([k]) => (k !== "download" || job.opts.url) && (!editOnly || ["download", "extract", "mux", "done"].includes(k))).map(([k, label]) => {
               const i = STEPS.findIndex((x) => x[0] === k), cur = STEPS.findIndex((x) => x[0] === job.stage);
               return <span key={k} className={job.status === "done" || i < cur ? "done" : i === cur ? "cur" : ""}>{label}</span>;
             })}
@@ -574,6 +680,12 @@ export default function Studio() {
           {(trim.from > 0 || trim.to > 0) && <button type="button" className="btn ghost sm" onClick={() => setTrim({ from: 0, to: 0 })}>Whole video</button>}
         </div>
       );
+      case "edit": return (
+        <CutList value={edit} onChange={setEdit} selected={selectedCut} onSelect={setSelectedCut} onSeek={seek}
+          onPlayFrom={(t) => { const el = videoRef.current; if (el) { audio.start(); el.currentTime = t; el.play().catch(() => {}); } }} />
+      );
+      case "stickers": return <StickerSettings value={edit} onChange={setEdit} id={selectedSticker} time={time} onDone={() => setSelectedSticker(null)} />;
+      case "thumb": return <ThumbnailMaker value={thumb} jobId={job?.meta ? job.id : undefined} time={time} sub={look.sub} version={v} />;
       case "voice": return (
         <div className="pane">
           <h4>About the voice</h4>
@@ -589,14 +701,18 @@ export default function Studio() {
       case "export": return (
         <div className="pane">
           <h4>Export</h4>
-          <small className="note">Merges the video, Khmer voice, sound mix, subtitles, text, logo and effects into one MP4 with the settings you see now.</small>
+          <small className="note">Merges the video{editOnly ? "" : ", Khmer voice"}, sound mix, {editOnly ? "" : "subtitles, "}text, stickers, logo, effects and cuts into one MP4 with the settings you see now.</small>
           <button type="button" className="btn wide" disabled={!job || job.status !== "done" || working} onClick={exportVideo}>
             {working && job?.stage === "mux" ? "Exporting…" : "⬆ Export video"}</button>
           {job?.tracks?.output && (
             <>
               <small className={exportCurrent ? "ok-note" : "note"}>{exportCurrent ? "✓ Up to date with your edits" : "Changed since the last export – export again to include the changes."}</small>
               <div className="downloads">
-                {DOWNLOADS.map(([f, t, s]) => <a key={f} href={`${base}${f}?download=1&v=${v}`}><b>{t}</b><small>{s}</small></a>)}
+                {DOWNLOADS.filter(([f]) => !editOnly || f === "output.mp4").map(([f, t, s]) => <a key={f} href={`${base}${f}?download=1&v=${v}`}><b>{t}</b><small>{s}</small></a>)}
+                {job.tracks.shapes?.map((a) => (
+                  <a key={a} href={`${base}output_${a.replace(":", "x")}.mp4?download=1&v=${v}`}><b>🎬 Video {a}</b><small>same edit, other shape</small></a>
+                ))}
+                {job.tracks.thumbnail && <a href={`${base}thumbnail.jpg?download=1&v=${v}`}><b>📸 Thumbnail</b><small>.jpg</small></a>}
               </div>
             </>
           )}
@@ -607,7 +723,8 @@ export default function Studio() {
 
   // ---------------------------------------------------------------- top bar action
   let primary: React.ReactNode;
-  if (!job) primary = <button type="button" className="btn" disabled={busy} onClick={start}>{uploadPct !== null ? `Uploading ${uploadPct}%` : "▶ Start dubbing"}</button>;
+  if (!job) primary = mode === "batch" ? <span className="note">Start the batch on the left</span>
+    : <button type="button" className="btn" disabled={busy} onClick={start}>{uploadPct !== null ? `Uploading ${uploadPct}%` : projectMode === "edit" ? "▶ Open in the editor" : "▶ Start dubbing"}</button>;
   else if (working) primary = <button type="button" className="btn" disabled>{Math.round(job.progress * 100)}% · {job.message.slice(0, 38)}</button>;
   else if (job.status === "review") primary = <button type="button" className="btn" onClick={() => makeVoices()}>🗣 Generate Khmer voice</button>;
   else if (job.status === "error") primary = <button type="button" className="btn" onClick={job.meta ? () => makeVoices() : retryFirstStep}>Try again</button>;
@@ -647,12 +764,18 @@ export default function Studio() {
           {pendingExport && <small className="note"> · export follows</small>}
         </div>
         <div className="actions">
+          {job && (
+            <span className="undo">
+              <button type="button" className="btn ghost sm" disabled={!hist.current.past.length} onClick={undo} title="Undo (Ctrl+Z)">↶</button>
+              <button type="button" className="btn ghost sm" disabled={!hist.current.future.length} onClick={redo} title="Redo (Ctrl+Y)">↷</button>
+            </span>
+          )}
           <span className="err">{err || (job?.status === "done" && job.message.startsWith("No Khmer voice") ? job.message : "")}</span>{primary}
         </div>
       </header>
 
       <nav className="rail">
-        {TABS.map(([k, icon, name]) => (
+        {TABS.filter(([k]) => !editOnly || !DUB_TABS.includes(k)).map(([k, icon, name]) => (
           <button type="button" key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}><span>{icon}</span>{name}</button>
         ))}
       </nav>
@@ -661,7 +784,9 @@ export default function Studio() {
       <main className="center">
         <Player src={src} finalSrc={finalSrc} view={view} onView={setView} look={look} onLook={setLook} segs={segs}
           logoUrl={brand?.logo?.url ?? null} videoRef={videoRef} onPlay={audio.start} onTime={onTime} onDuration={onDuration}
-          jobId={job?.meta ? job.id : undefined} placeholder={placeholder} />
+          jobId={job?.meta ? job.id : undefined} placeholder={placeholder}
+          edit={edit} onEdit={setEdit} selectedSticker={selectedSticker}
+          onSelectSticker={(id) => { setSelectedSticker(id); if (id) setTab("stickers"); }} />
       </main>
 
       <aside className="panel right">
@@ -675,7 +800,9 @@ export default function Studio() {
         <Timeline duration={duration || job?.meta?.duration || 0} time={time} onSeek={seek} segs={segs} edited={edited}
           selected={selected} onSelect={(i) => { setSelected(i); if (i !== null && tab !== "voice") setTab("captions"); }}
           parts={mix.parts} selectedPart={selectedPart} onSelectPart={(i) => { setSelectedPart(i); setTab("audio"); }}
-          trim={!job && src ? trim : null} onTrim={setTrim} speakers={speakers} />
+          trim={!job && src ? trim : null} onTrim={setTrim} speakers={speakers}
+          cuts={edit.cuts} selectedCut={selectedCut} onSelectCut={(i) => { setSelectedCut(i); setTab("edit"); }} marks={marks}
+          stickers={edit.stickers} selectedSticker={selectedSticker} onSelectSticker={(id) => { setSelectedSticker(id); setTab("stickers"); }} />
       </footer>
     </div>
   );

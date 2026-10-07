@@ -17,6 +17,14 @@ Upload a Chinese or English video (or paste a link) and get back:
   Vintage, Black & white), brightness / contrast / saturation, sharpen, mirror, fade in & out, a progress bar,
   your text on the picture (channel name, episode) and animated subtitles (fade or pop)
 - 📝 the original-language `.srt`, plus the Khmer audio on its own
+- ✂ **a video editor too** (like CapCut / Premiere) – also for videos you don't dub (**Edit only** projects keep
+  their own sound): cut parts out with In / Out marks (keys `I`, `O`, `Delete` – ripple delete, picture, sound and
+  subtitles together), **remove silent parts** in one click (jump cut), **speed** 0.5×–2×, **undo / redo**
+  (`Ctrl+Z` / `Ctrl+Y`), **image stickers** (PNG, animated GIF) dragged on the picture, slow **zoom** (Ken Burns)
+  or **punch-in** zoom, **karaoke subtitles** (the word being said lights up), **noise reduction**, your channel's
+  **intro / outro** clips, **several shapes in one export** (16:9 + 9:16 …), a **thumbnail maker** (frame + big
+  Khmer title) and a **translation glossary** (names always translated the same way)
+- 📦 **batch**: many links and / or files at once, each dubbed (or edited) and exported one after the other
 - ⚡ **subtitles the video already has** (an English or Chinese track in the file, or the uploader's subtitles on
   YouTube / Bilibili …) are used as they are instead of listening with Whisper – much faster. Subtitles burned into
   the picture are not read. With 🎭 auto, 👦 boy or 👧 girl the voices are separated from the music in the
