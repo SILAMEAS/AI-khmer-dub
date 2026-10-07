@@ -395,3 +395,7 @@ body:has(.studio) { overflow: hidden; background: #0d0d10; }
 @supports not selector(::-webkit-scrollbar) { /* Firefox */
   .studio, .studio * { scrollbar-width: thin; scrollbar-color: #4b4b57 transparent; }
 }
+.net { font-size: 13px; color: var(--muted); }
+.net summary { cursor: pointer; padding: 2px 0; }
+.net[open] { display: flex; flex-direction: column; gap: 6px; }
+.net input, .net select { width: 100%; }

@@ -14,13 +14,15 @@ import {
   CRF, FONTS_DIR, logoFile, musicFile, parseFx, parseLogo, parseOut, parseSubStyle, pictureFilter, titleAss,
   type FxOpts, type LogoOpts, type OutOpts, type SubStyle,
 } from "./branding";
+import { findCaptions } from "./captions";
+import { download, reusableInput } from "./download";
 import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample, stemsReady } from "./clone";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
 export type Voice = keyof typeof VOICES;
 /** auto: boy or girl per line; clone: each line in the original speaker's own voice (lib/clone.ts). */
 export type VoiceChoice = Voice | "auto" | "clone";
-export const defaultVoice = (): VoiceChoice => (cloneAvailable() ? "clone" : "auto");
+export const defaultVoice = (): VoiceChoice => "auto"; // fastest; voice cloning is picked by hand
 /** Why a requested voice can't be used, or null when it can. */
 export function voiceError(v: string): string | null {
   if (v === "clone") return cloneAvailable() ? null : "Voice cloning is not installed - run: npm run setup -- --clone";
@@ -115,6 +117,7 @@ export function parseTrim(v: unknown): Trim | undefined {
 }
 export type Meta = {
   input: string; title: string; duration: number; language: string; segments: number; speakers?: number;
+  captions?: string; // where the lines came from when the video's own subtitles were used instead of Whisper
 };
 
 // ---------------------------------------------------------------- helpers
@@ -193,32 +196,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- stage 1: input
 
-async function download(url: string, jd: string, report: Report): Promise<{ file: string; title: string }> {
-  let file = "", title = "video";
-  report("download", 0, "Downloading video");
-  await run(tool("yt-dlp"), [
-    url, "--no-playlist", "--newline", "--progress", "--encoding", "utf-8",
-    "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b",
-    "--merge-output-format", "mp4",
-    "--ffmpeg-location", path.dirname(tool("ffmpeg")),
-    "-o", path.join(jd, "input.%(ext)s"),
-    "--print", "after_move:FILE:%(filepath)s",
-    "--print", "after_move:TITLE:%(title)s",
-  ], {
-    onLine: (l) => {
-      const m = l.match(/\[download\]\s+([\d.]+)%/);
-      if (m) report("download", parseFloat(m[1]) / 100, "Downloading video");
-      if (l.startsWith("FILE:")) file = l.slice(5).trim();
-      if (l.startsWith("TITLE:")) title = l.slice(6).trim();
-    },
-  });
-  if (!file || !fs.existsSync(file)) {
-    const f = fs.readdirSync(jd).find((n) => n.startsWith("input.") && !/\.(part|ytdl)$/.test(n));
-    if (!f) throw new Error("Download finished but no video file was found");
-    file = path.join(jd, f);
-  }
-  return { file, title };
-}
+// download(): lib/download.ts
 
 // ---------------------------------------------------------------- stage 2: speech to text
 
@@ -533,45 +511,50 @@ function analyzeSpeakers(jd: string, segs: Segment[], report: Report) {
 
 export async function prepare(jd: string, opts: Opts, report: Report): Promise<Meta> {
   let src: string, title = opts.title || "video";
+  // a link's picture still downloading while the sound is worked on (lib/download.ts)
+  let pending: Awaited<ReturnType<typeof download>> | undefined;
   // a video downloaded before (the first try failed later on) is used again instead of downloading it twice
-  const downloaded = opts.url ? fs.readdirSync(jd).find((n) => /^input\.(mp4|mkv|webm|mov)$/i.test(n)) : undefined;
+  const downloaded = opts.url ? await reusableInput(jd) : undefined; // only when whole (a download can end early)
   if (opts.url && downloaded) {
     src = path.join(jd, downloaded);
-    if (!opts.title) { // made before titles were kept: ask the site for the title only (no download)
-      const out = await run(tool("yt-dlp"), [opts.url, "--no-playlist", "--skip-download", "--encoding", "utf-8", "--print", "title"])
-        .catch(() => Buffer.from(""));
-      opts.title = out.toString("utf8").trim().split(/\r?\n/)[0] || "video";
-    }
-    title = opts.title;
+    title = opts.title ||= "video"; // kept from the first try; the site is not asked again
   } else if (opts.url) {
-    ({ file: src, title } = await download(opts.url, jd, report));
+    pending = await download(opts.url, jd, report, opts.out?.size || 1080);
+    ({ sound: src, title } = pending);
     opts.title = title;
   }
   else src = path.join(jd, opts.inputName!);
 
-  if (opts.trim) src = await cut(jd, src, opts.trim, report);
+  // subtitles the video already has are used as they are: nothing to listen to (much faster than Whisper)
+  report("transcribe", 0, "Looking for subtitles in the video");
+  const captions = await findCaptions(src, jd, opts.sourceLang, opts.trim)
+    .catch((e) => { console.error(e); return null; });
+
+  // only the sound came so far: cut that now, the picture once it is there
+  if (opts.trim) src = pending?.soundOnly ? await cutSound(jd, src, opts.trim) : await cut(jd, src, opts.trim, report);
 
   report("extract", 0, "Extracting audio");
   const wav = path.join(jd, "audio16k.wav");
   await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
 
-  // voices apart from the music first (when wanted): speech under music is then recognised far better
+  // Voice cloning needs the voices apart from the music first (speech under music is then also recognised
+  // better). The other voices don't wait for it: the editor separates them in the background afterwards.
   let speechWav = wav;
-  if (opts.voice === "clone" || wantsStems(opts)) {
-    try {
-      report("separate", 0, "Separating voices from music");
-      await separate(jd, src, duration, (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
-      speechWav = path.join(jd, "vocals16k.wav");
-      await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, VOCALS), "-ac", "1", "-ar", "16000", speechWav]);
-    } catch (e) {
-      if (opts.voice === "clone") throw e; // cloning needs the voices; otherwise the full sound will do
-      console.error(e);
-    }
+  if (opts.voice === "clone") {
+    report("separate", 0, "Separating voices from music");
+    await separate(jd, src, duration, (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
+    speechWav = path.join(jd, "vocals16k.wav");
+    if (!captions) await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, VOCALS), "-ac", "1", "-ar", "16000", speechWav]);
   }
-  const { lines, language } = await transcribe(speechWav, jd, opts.sourceLang, opts.quality, report);
+  if (captions) report("transcribe", 1, `Using ${captions.from} (${captions.lines.length} lines)`);
+  const { lines, language } = captions
+    ? { lines: captions.lines.map((c): RawLine => ({ ...c, words: [] })), language: captions.language }
+    : await transcribe(speechWav, jd, opts.sourceLang, opts.quality, report);
   if (!lines.length) throw new Error("No speech was detected in this video");
-  const meta: Meta = { input: path.basename(src), title, duration, language, segments: 0 };
+  const meta: Meta = {
+    input: path.basename(src), title, duration, language, segments: 0, ...(captions && { captions: captions.from }),
+  };
   const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
   meta.segments = segs.length;
   analyzeSpeakers(jd, segs, report);
@@ -579,7 +562,24 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   saveSegments(jd, segs);
   writeSrt(path.join(jd, "original.srt"), segs.map((s) => [s.start, s.end, s.text]));
   writeSubs(jd, segs.map((s) => [s.start, s.end, s.km, s.text]));
+  if (pending?.soundOnly) { // the picture of a link came down meanwhile (or is nearly there)
+    pending.watch();
+    let video = await pending.video;
+    if (opts.trim) video = await cut(jd, video, opts.trim, report);
+    meta.input = path.basename(video);
+  }
   return meta;
+}
+
+/** The chosen part of a link's sound, while its picture is still downloading (cut() does the picture later). */
+async function cutSound(jd: string, src: string, { from, to }: Trim): Promise<string> {
+  const total = await probeDuration(src);
+  if (from >= total - 0.5) throw new Error(`The cut starts at ${clock(from)}, but the video is only ${clock(total)} long`);
+  const len = (to && to < total ? to : total) - from;
+  const out = path.join(jd, "sound_cut.m4a");
+  await run(tool("ffmpeg"), ["-y", "-v", "error", "-ss", from.toFixed(3), "-i", src, "-t", len.toFixed(3), "-vn",
+    "-c:a", "aac", "-b:a", "192k", out]);
+  return out;
 }
 
 /** Only the chosen part of the video, cut to the frame (re-encoded: a copy could only cut at keyframes). */
@@ -776,33 +776,41 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
   const refDb = median(dbs);
   const fadeIn = Math.round(0.01 * SR), fadeOut = Math.round(0.04 * SR);
 
-  // decode every line at once (one ffmpeg per line, many in parallel), then place them in order
+  // Every line is decoded (one ffmpeg per line, many in parallel) and kept on disk, not in memory: a 4-hour film has
+  // thousands of lines, hours of sound. Only the lengths stay in memory to place the lines.
   const files = segs.map((_, i) => {
     const cloned = path.join(dir, `${i}.vc.wav`);
     return clone && fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
   });
-  const audio = await mapLimit(files, DECODE_JOBS, async (f) => (fs.existsSync(f) ? trimSilence(await decodeMono(f)) : null));
+  const f32 = (i: number) => path.join(dir, `${i}.f32`);
+  const save = (file: string, a: Float32Array) => fsp.writeFile(file, Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+  const load = async (file: string) => {
+    const bytes = await fsp.readFile(file), a = new Float32Array(bytes.length / 4);
+    new Uint8Array(a.buffer).set(bytes);
+    return a;
+  };
+  const lengths = await mapLimit(files.map((f, i) => ({ f, i })), DECODE_JOBS, async ({ f, i }) => {
+    if (!fs.existsSync(f)) return 0;
+    const a = trimSilence(await decodeMono(f));
+    if (a.length) await save(f32(i), a);
+    return a.length;
+  });
   report("mix", 0.1, "Syncing Khmer voice to the video");
   // lines that run into the next one get sped up; the expected length keeps the following lines in place
   const plan: { i: number; factor: number }[] = [];
   for (let i = 0, at = 0; i < segs.length; i++) {
-    const a = audio[i];
-    if (!a?.length) continue;
+    const n = lengths[i];
+    if (!n) continue;
     const pos = Math.max(segs[i].start, at);
     const avail = Math.max((i + 1 < segs.length ? segs[i + 1].start : duration) - pos - GAP, 0.1);
-    const factor = a.length / SR > avail ? Math.min(a.length / SR / avail, MAX_SPEEDUP) : 1;
+    const factor = n / SR > avail ? Math.min(n / SR / avail, MAX_SPEEDUP) : 1;
     plan.push({ i, factor });
-    at = pos + a.length / SR / factor + GAP;
+    at = pos + n / SR / factor + GAP;
   }
-  await mapLimit(plan.filter((p) => p.factor > 1), DECODE_JOBS, async (p) => {
-    audio[p.i] = trimSilence(await decodeMono(files[p.i], stretch(p.factor)));
-  });
-  report("mix", 0.25, "Syncing Khmer voice to the video");
-
-  for (const { i } of plan) {
-    const a = audio[i]!;
-    if (!a.length) continue;
-    const pos = Math.max(segs[i].start, cursor);
+  // each line sped up where needed, then its level and fades (many at once, each written back straight away)
+  const final = await mapLimit(plan, DECODE_JOBS, async ({ i, factor }) => {
+    const a = factor > 1 ? trimSilence(await decodeMono(files[i], stretch(factor))) : await load(f32(i));
+    if (!a.length) { await fsp.rm(f32(i), { force: true }); return 0; }
     // follow the original: a shout stays louder than a whisper (half the difference, at most ±6 dB)
     const db = segs[i].db;
     const lift = match && dbs.length && db !== undefined && db > -60 ? Math.max(-6, Math.min(6, (db - refDb) / 2)) : 0;
@@ -815,11 +823,18 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
       const fade = Math.min(1, j / fadeIn, (a.length - 1 - j) / fadeOut);
       out[j] = a[j] * k * fade;
     }
-    const file = path.join(dir, `${i}.f32`);
-    await fsp.writeFile(file, Buffer.from(out.buffer));
-    clips.push({ i, pos: Math.round(pos * SR), len: out.length, file });
-    cursor = pos + out.length / SR + GAP;
-  }
+    await save(f32(i), out);
+    return out.length;
+  });
+  report("mix", 0.25, "Syncing Khmer voice to the video");
+
+  plan.forEach(({ i }, k) => {
+    const len = final[k];
+    if (!len) return;
+    const pos = Math.max(segs[i].start, cursor);
+    clips.push({ i, pos: Math.round(pos * SR), len, file: f32(i) });
+    cursor = pos + len / SR + GAP;
+  });
   return clips;
 }
 
@@ -1135,7 +1150,8 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): P
       report("clone", f, `Speaking in the original voices ${Math.round(f * items.length)}/${items.length}`));
     for (const x of items) if (fs.existsSync(x.out)) fs.writeFileSync(path.join(ttsDir, `${x.i}.vckey`), x.key, "utf8");
   }
-  await layers(jd, segs, opts, meta, report);
+  // only voice cloning needed the voices apart from the music; for the others it is done in the background
+  await layers(jd, segs, opts, meta, report, opts.voice === "clone");
   if (failed.length) {
     return `No Khmer voice for line${failed.length > 1 ? "s" : ""} ${failed.map((i) => i + 1).join(", ")} `
       + "(no internet, or nothing to say in it) - edit it or try Update voices again";
@@ -1146,9 +1162,9 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): P
  * The separate layers the editor previews live: the Khmer voice track, subtitles timed to it and, when asked for,
  * the original voices apart from the music. Nothing is merged here - that is export's job.
  */
-async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, report: Report): Promise<Clip[]> {
+async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, report: Report, stems = true): Promise<Clip[]> {
   const src = path.join(jd, meta.input);
-  if (wantsStems(opts)) await separateVoices(jd, meta, report); // done once per video, then kept
+  if (stems && wantsStems(opts)) await separateVoices(jd, meta, report); // done once per video, then kept
   const clips = await placeClips(segs, path.join(jd, "tts"), meta.duration, opts.match !== false, opts.voice === "clone", report);
   await writeVoiceTrack(jd, clips, meta.duration);
   writeSubs(jd, timedSubs(segs, clips, meta.duration));

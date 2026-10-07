@@ -38,7 +38,13 @@ export function tool(name: "ffmpeg" | "ffprobe" | "yt-dlp" | "whisper-cli"): str
   return (cache[name] = findExe(name));
 }
 
-type RunOpts = { cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void };
+/**
+ * idleTimeout: stop the program when it prints nothing for this many ms (e.g. a download stuck on a blocked network).
+ * signal: stop it on request (e.g. a download whose addresses expired: retrying them is no use).
+ */
+type RunOpts = {
+  cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; idleTimeout?: number; signal?: AbortSignal;
+};
 
 /** Run a program; resolves with stdout. Rejects with the tail of stderr on failure. */
 export function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<Buffer> {
@@ -54,11 +60,30 @@ export function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<Bu
       partial = parts.pop() ?? "";
       parts.forEach((l) => l && opts.onLine!(l));
     };
-    p.stdout.on("data", (c: Buffer) => { out.push(c); lines(c); });
-    p.stderr.on("data", (c: Buffer) => { err = (err + c.toString("utf8")).slice(-4000); lines(c); });
-    p.on("error", reject);
+    let idle: ReturnType<typeof setTimeout> | undefined, stalled = false;
+    // the whole tree: yt-dlp.exe, for one, runs its work in a second process
+    const stop = () => {
+      if (process.platform === "win32" && p.pid) spawn("taskkill", ["/pid", String(p.pid), "/T", "/F"], { windowsHide: true });
+      else p.kill();
+    };
+    const alive = () => {
+      if (!opts.idleTimeout) return;
+      clearTimeout(idle);
+      idle = setTimeout(() => { stalled = true; stop(); }, opts.idleTimeout);
+    };
+    alive();
+    const onAbort = () => stop();
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    p.stdout.on("data", (c: Buffer) => { out.push(c); lines(c); alive(); });
+    p.stderr.on("data", (c: Buffer) => { err = (err + c.toString("utf8")).slice(-4000); lines(c); alive(); });
+    p.on("error", (e) => { clearTimeout(idle); reject(e); });
     p.on("close", (code) => {
-      if (code === 0) resolve(Buffer.concat(out));
+      clearTimeout(idle);
+      opts.signal?.removeEventListener("abort", onAbort);
+      if (opts.signal?.aborted) reject(new Error(`${path.basename(cmd)} stopped: ${String(opts.signal.reason ?? "")}\n${err.slice(-1500)}`));
+      else if (stalled) {
+        reject(new Error(`${path.basename(cmd)} timed out: no response for ${Math.round(opts.idleTimeout! / 1000)} s\n${err.slice(-1500)}`));
+      } else if (code === 0) resolve(Buffer.concat(out));
       else reject(new Error(`${path.basename(cmd)} failed (code ${code}):\n${err.slice(-1500)}`));
     });
   });

@@ -33,7 +33,7 @@ export type Job = {
     url: string; voice: VoiceChoice; match?: boolean; rate: number; bgMode: "duck" | "none"; burn: boolean;
     sub?: object; logo?: object; out?: object; fx?: object; mix?: Partial<Mix>; trim?: { from: number; to: number };
   };
-  meta?: { title: string; duration: number; language: string; segments: number; speakers?: number };
+  meta?: { title: string; duration: number; language: string; segments: number; speakers?: number; captions?: string };
   tracks?: { voice: boolean; vocals: boolean; output: boolean };
   task?: { name: "separate"; progress: number; message: string }; // runs in the background, the editor stays usable
   taskError?: string;

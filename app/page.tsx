@@ -15,6 +15,7 @@ import {
 import { SoundShaping, SoundSources, useLiveAudio } from "./editor/sound";
 import { Player } from "./editor/Player";
 import { Timeline } from "./editor/Timeline";
+import { LinkBox } from "./editor/link";
 
 type Tab = "media" | "voice" | "captions" | "text" | "filters" | "effects" | "audio" | "logo" | "export";
 const TABS: [Tab, string, string][] = [
@@ -164,7 +165,7 @@ export default function Studio() {
       const p = JSON.parse(localStorage.getItem(PREFS) || "null");
       if (p) { setMix(fullMix(p.mix)); setBgMode(p.bgMode === "none" ? "none" : "duck"); setRate(p.rate ?? 0); setMatch(p.match !== false); }
     } catch {}
-    api<{ clone: boolean }>("/api/capabilities").then((c) => { setCanClone(c.clone); if (c.clone) setVoice("clone"); }).catch(() => {});
+    api<{ clone: boolean }>("/api/capabilities").then((c) => { setCanClone(c.clone); }).catch(() => {});
     loadHistory();
     // a project opened by its link, optionally at a tool and a moment: ?job=<id>&tab=filters&t=30
     const q = new URLSearchParams(location.search), linked = q.get("job");
@@ -441,7 +442,7 @@ export default function Studio() {
           {job ? (
             <div className="project-card">
               <b>{job.meta?.title || job.title}</b>
-              <small>{job.meta ? `${clock(job.meta.duration)} · ${job.meta.language} · ${job.meta.segments} lines` : job.message}</small>
+              <small>{job.meta ? `${clock(job.meta.duration)} · ${job.meta.language} · ${job.meta.segments} lines${job.meta.captions ? " · from subtitles" : ""}` : job.message}</small>
               <button type="button" className="btn ghost sm" onClick={() => openJob(null)}>+ New project</button>
             </div>
           ) : (
@@ -455,7 +456,7 @@ export default function Studio() {
                   {file ? <><b>{file.name}</b><small>{(file.size / 1048576).toFixed(1)} MB · click to change</small></> : <><b>＋ Import video</b><small>MP4, MKV, MOV, AVI, WEBM…</small></>}
                 </button>
               ) : (
-                <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://… YouTube, Facebook, TikTok, Bilibili" />
+                <LinkBox value={url} onChange={setUrl} size={look.out.size || 1080} />
               )}
               <input ref={fileInput} type="file" accept="video/*,.mkv,.ts" hidden onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])} />
               <label className="f">Original language</label>

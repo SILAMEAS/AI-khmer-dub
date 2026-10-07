@@ -17,6 +17,10 @@ Upload a Chinese or English video (or paste a link) and get back:
   Vintage, Black & white), brightness / contrast / saturation, sharpen, mirror, fade in & out, a progress bar,
   your text on the picture (channel name, episode) and animated subtitles (fade or pop)
 - 📝 the original-language `.srt`, plus the Khmer audio on its own
+- ⚡ **subtitles the video already has** (an English or Chinese track in the file, or the uploader's subtitles on
+  YouTube / Bilibili …) are used as they are instead of listening with Whisper – much faster. Subtitles burned into
+  the picture are not read. With 🎭 auto, 👦 boy or 👧 girl the voices are separated from the music in the
+  background, so the Khmer voice is ready without waiting for it
 
 ---
 
@@ -105,13 +109,15 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 |   | Node packages | `npm install` (Next.js, React, msedge-tts) | `node_modules/` | ~0.5 GB |
 | 2 | **ffmpeg** | **downloaded**: gyan.dev's full build (`.zip` from GitHub; it has rubberband and draws Khmer subtitles correctly – other builds don't), or copied in if that build is already on the PC | `bin/` | ~0.4 GB |
 | 3 | **whisper.cpp** | speech recognition program (newest Windows build) | `bin/whisper/` | small |
-|   | **yt-dlp** | downloads videos from links | `bin/yt-dlp.exe` | small |
+|   | **yt-dlp** | downloads videos from links (updates itself once a day) | `bin/yt-dlp.exe` | small |
+|   | **aria2c** | downloads each video file over 8 connections at once | `bin/aria2c.exe` | small |
+|   | **Deno** | runs YouTube's JavaScript for yt-dlp (without it: 480p at most, or "not a bot" errors) | `bin/deno.exe` | ~0.1 GB |
 | 4 | Speech models | Whisper `large-v3-turbo` + Silero VAD (skips music and silence) | `models/` | ~0.6 GB |
 | 5 | **Python 3.12** | a **portable** Python downloaded into the project (nothing installed in Windows); an existing environment made from a Python elsewhere is moved here | `py/python/` | ~0.1 GB |
 |   | Python environment | a private environment just for this app | `py/venv/` | – |
-| 6 | Voice cloning packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, transformers 4.57.6, librosa, … – **exact tested versions** | `py/venv/` | ~1.5 GB |
+| 6 | Voice cloning packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, OpenVINO 2026.4.1, transformers 4.57.6, librosa, … – **exact tested versions** | `py/venv/` | ~1.5 GB |
 |   | Seed-VC | voice conversion code, pinned to the tested version (downloaded as a zip, git not needed) | `py/src/seed-vc/` | small |
-|   | Voice models | Demucs (voice/music separation), Seed-VC, Whisper-small, BigVGAN | `models/hf/` | ~2.7 GB |
+|   | Voice models | MDX-Net Kim Vocal 2 + Demucs (voice/music separation), Seed-VC, Whisper-small, BigVGAN | `models/hf/` | ~2.7 GB |
 | 7 | Build | `npm run build` | `.next/` | small |
 
 Temporary files and download caches stay in the folder too (`tmp/`, `.cache/npm/`, `py/tmp/`, `py/cache/`).
@@ -221,22 +227,59 @@ Start with a short clip to try it.
 
 | Step | Tool |
 |---|---|
-| Download link | `bin/yt-dlp.exe` (YouTube, Facebook, TikTok, Bilibili, … up to 1080p) |
+| Download link | `bin/yt-dlp.exe` + `bin/deno.exe` (YouTube, Facebook, TikTok, Bilibili, Douyin … up to 1080p), with the site's own subtitles – see [Video links](#video-links) |
+| Subtitles already there | an English / Chinese subtitle track in the file, or the uploader's subtitles on the site, are used instead of Whisper (`lib/captions.ts`) |
 | Speech → text | whisper.cpp + `large-v3-turbo` (or medium / small). Silero VAD finds where people speak (on the voices separated from the music when possible); the speech is glued together, recognised, and every word is put back at its real time – a new line at every pause; speech that came back empty is listened to again |
 | Who speaks (AI voices) | pitch of each line (YIN, `lib/voice.ts`) → boy or girl voice |
-| Original voices | Demucs splits voices from music → CAMPPlus voice prints group lines by person and split a line where someone cuts in → a voice sample per person → Seed-VC re-speaks each Khmer line in that person's voice (`scripts/voice_clone.py`, `lib/clone.ts`) |
+| Original voices | MDX-Net Kim Vocal 2 (OpenVINO, on the Intel graphics + CPU) splits voices from music, Demucs when that is missing → CAMPPlus voice prints group lines by person and split a line where someone cuts in → a voice sample per person → Seed-VC re-speaks each Khmer line in that person's voice (`scripts/voice_clone.py`, `lib/clone.ts`) |
 | Translate → Khmer | Google Translate, sent in batches so lines keep their context |
 | Khmer voice | Microsoft Edge neural voices via `msedge-tts`, 8 lines in parallel; pitch moved toward the original speaker; long lines spoken faster by the voice itself |
 | Sync | each line fitted into its original time slot (ffmpeg `rubberband`, or `atempo`, at most 1.6× faster), loudness follows the original, short fades against clicks |
-| Soundtrack | original voices removed (Demucs), lowered, or kept at a level you choose; music dips while people speak; your own music mixed in |
+| Soundtrack | original voices removed (separated in the background, see above), lowered, or kept at a level you choose; music dips while people speak; your own music mixed in |
 | Output | ffmpeg: video copied as-is, or re-encoded when subtitles are burned in |
+
+### Video links
+
+A link goes through these steps (`lib/download.ts`); after step 7 it is exactly like an uploaded file.
+
+| # | Step | What happens |
+|---|---|---|
+| 1 | Read the link | the first `https://…` in what was pasted – a whole share text works too ("复制打开抖音 https://v.douyin.com/… 看看") |
+| 2 | Start on paste | the moment a link is pasted it starts downloading by itself – what the site says (title and length are shown, or why it can't be downloaded) and then the **sound** – into `jobs/_prefetch/`; while you choose the voice and settings it keeps going, and **Start** takes it over (in our test the sound was handed to the pipeline 0.08 s after Start). Not started within 2 hours: deleted |
+| 3 | Update yt-dlp | at most once a day (`yt-dlp -U`); sites change often, and an old yt-dlp is the most common reason links stop working |
+| 4 | Ask the site once | title, formats and subtitles are read once (on paste, or on Start) (yt-dlp with Deno for YouTube's JavaScript, the proxy from **Network**, 30 s timeouts and many retries) and saved as `info.json`; the downloads use it instead of asking again |
+| 5 | Download, fast | the **picture and the sound at the same time**, each file over **8 connections** (aria2c) or 8 pieces at once (streamed formats); the picture no bigger than the export size (Export → size, short side: 480 / 720 / 1080), so nothing is downloaded only to be thrown away; a stopped download goes on where it stopped |
+| 6 | Start before the end | as soon as the **sound** is in (a few MB), subtitles, speech recognition and translation start; the picture keeps coming meanwhile and is merged into `input.mp4` (and cut, for a part of the video) at the end – for most videos the download takes no extra time at all |
+| – | Sign-in (only if asked) | when YouTube says "confirm you're not a bot", the download runs again with the YouTube login of Firefox, Edge or Chrome on this PC (as chosen under **Network**) |
+| 7 | Subtitles | the uploader's English / Chinese subtitles come down with the sound into `captions/` and are used instead of Whisper |
+| 8 | Checked whole | every downloaded file's length is compared with the video's: a download can end early while saying all went well (an 82-minute film once came back as 25 s of picture and 60 s of sound). A short file is deleted and downloaded again with yt-dlp's own downloader in 10 MB requests; a short `input.mp4` from an earlier try is never reused |
+| ✗ | When it fails | the reason in plain words with what to do (network blocked, sign-in, private, removed, blocked in your country, unsupported link, live stream), then yt-dlp's own last error line; a download where nothing comes through for 5 minutes is stopped |
+
+**Long videos (up to 4 hours and more).** Before downloading, the free disk space is checked against the video's
+length (about 25 GB for 4 hours at 1080p: the download, the work files and the export). The site's download
+addresses expire after some hours (YouTube's after ~6): when the site starts answering "403 Forbidden", the download
+is stopped at once, the site is asked for new addresses, and it goes on where it stopped (an hour-old answer is
+renewed before a download even starts). Waits between retries grow from 1 s to 8 s at most. Unfinished pieces of
+streamed videos are an error, never silently left out. The dubbed lines are lined up on disk, not in memory
+(a 4-hour film: 0.12 GB instead of 2.5 GB).
+
+**If links fail but uploads work**, the network is the cause almost every time. Some networks (offices, schools)
+block or slow video sites: `google.com` loads but YouTube, TikTok, Facebook and Bilibili time out, and after a few
+timeouts YouTube starts asking "confirm you're not a bot". Then:
+
+- use another connection (a phone hotspot or home Wi-Fi), or
+- put your proxy / VPN address under **Media → Video link → Network** (e.g. `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`), or
+- download the video another way and use **Upload file** (it is processed exactly the same).
+
+For "not a bot" on a good connection: sign in to YouTube in Firefox (works best – Chrome and Edge often lock their
+logins away from other programs), close Firefox, and try again.
 
 ### Folders
 
 | Folder | Contents | In git? |
 |---|---|---|
 | `app/` | the editor (`page.tsx`; `editor/`: `Player.tsx` live preview, `Timeline.tsx`, `look.tsx` picture settings, `sound.tsx` sound settings and live sound, `common.ts`) and API routes (`api/*`) | yes |
-| `lib/` | `pipeline.ts` (all processing steps), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
+| `lib/` | `pipeline.ts` (all processing steps), `download.ts` (video links), `captions.ts` (subtitles already in the video), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
 | `branding/` | your logo and uploaded fonts, used for every video | no |
 | `scripts/` | `setup.mjs` (installer), `voice_clone.py` (separation, speakers, cloning) | yes |
 | `bin/`, `models/`, `py/` | downloaded programs (ffmpeg, whisper.cpp, yt-dlp, a portable Node.js if needed), models, the portable Python (`py/python`) and its environment (`py/venv`) – made by `npm run setup` | no |

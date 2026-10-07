@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
 import { jobDir, jobs, startJob, type Job } from "@/lib/jobs";
 import { parseFx, parseLogo, parseOut, parseSubStyle } from "@/lib/branding";
+import { extractUrl } from "@/lib/download";
 import { defaultVoice, parseMix, parseTrim, voiceError, type Opts } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
@@ -35,7 +36,7 @@ export async function POST(req: Request) {
   let trim: Opts["trim"];
   try { trim = parseTrim(obj(p.trim)); } catch (e) { return bad((e as Error).message); }
   const opts: Opts = {
-    url: isJson ? String(p.url || "").trim() : "",
+    url: isJson ? extractUrl(String(p.url || "")) ?? "" : "", // the link out of a pasted share text
     sourceLang: (["zh", "en"].includes(p.sourceLang) ? p.sourceLang : "auto") as Opts["sourceLang"],
     quality: p.quality || "best",
     voice,
@@ -55,7 +56,7 @@ export async function POST(req: Request) {
   const id = randomUUID().slice(0, 10);
   const jd = jobDir(id);
   if (isJson) {
-    if (!/^https?:\/\//i.test(opts.url)) return bad("Paste a valid video link");
+    if (!opts.url) return bad("No video link found in what was pasted - copy the link of the video page (https://...)");
     fs.mkdirSync(jd, { recursive: true });
   } else {
     const name = q.get("name") || "";

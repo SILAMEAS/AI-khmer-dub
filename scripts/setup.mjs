@@ -175,6 +175,23 @@ if (!fs.existsSync(whisperDir) || !findFile(whisperDir, "whisper-cli.exe")) {
   fs.unlinkSync(zip);
 } else ok("whisper.cpp already present");
 await download("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", path.join(bin, "yt-dlp.exe"), "yt-dlp");
+// YouTube only gives its videos to a downloader that runs its JavaScript; yt-dlp needs Deno for that
+// (the Node.js running this app is often too old for it). Without it: 480p at most, or "not a bot" errors.
+if (!fs.existsSync(path.join(bin, "deno.exe"))) {
+  const zip = path.join(bin, "deno.zip");
+  await download("https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip", zip, "Deno (for YouTube)");
+  unzip(zip, bin);
+  fs.unlinkSync(zip);
+} else ok("Deno already present");
+// aria2c: downloads each file over 8 connections - many times faster where each connection is slowed down
+if (!fs.existsSync(path.join(bin, "aria2c.exe"))) {
+  const zip = path.join(bin, "aria2.zip"), tmpDir = path.join(bin, "aria2-tmp");
+  await download("https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip", zip, "aria2c (faster downloads)");
+  unzip(zip, tmpDir);
+  fs.renameSync(findFile(tmpDir, "aria2c.exe"), path.join(bin, "aria2c.exe"));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.unlinkSync(zip);
+} else ok("aria2c already present");
 
 // ---------------------------------------------------------------- 4. whisper models
 
@@ -266,7 +283,8 @@ if (wantClone) {
   pip("torch==2.14.1", "torchaudio==2.11.0", "--index-url", "https://download.pytorch.org/whl/cpu");
   console.log("  Voice separation and cloning packages...");
   pip("numpy==2.5.3", "scipy==1.18.1", "librosa==1.0.0", "soundfile==0.14.0", "munch==4.0.0", "einops==0.8.2",
-    "transformers==4.57.6", "huggingface_hub==0.36.2", "pyyaml==6.0.3", "matplotlib==3.11.2", "demucs==4.1.0");
+    "transformers==4.57.6", "huggingface_hub==0.36.2", "pyyaml==6.0.3", "matplotlib==3.11.2", "demucs==4.1.0",
+    "openvino==2026.4.1"); // runs the voice separation model on Intel graphics and CPUs
   ok("Python packages");
 
   // Seed-VC (zero-shot voice conversion) source, pinned to the tested commit; a zip, so git is not needed
@@ -282,7 +300,7 @@ if (wantClone) {
     fs.unlinkSync(zip);
   }
   ok("Seed-VC source");
-  console.log("  Voice models (Demucs, Seed-VC, Whisper-small, BigVGAN)...");
+  console.log("  Voice models (MDX-Net Kim Vocal 2, Demucs, Seed-VC, Whisper-small, BigVGAN)...");
   sh(venvPy, [path.join(root, "scripts", "voice_clone.py"), "download", "-", "-"]);
   ok("voice cloning ready");
 }
