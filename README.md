@@ -252,14 +252,14 @@ A link goes through these steps (`lib/download.ts`); after step 7 it is exactly 
 | 6 | Start before the end | as soon as the **sound** is in (a few MB), subtitles, speech recognition and translation start; the picture keeps coming meanwhile and is merged into `input.mp4` (and cut, for a part of the video) at the end – for most videos the download takes no extra time at all |
 | – | Sign-in (only if asked) | when YouTube says "confirm you're not a bot", the download runs again with the YouTube login of Firefox, Edge or Chrome on this PC (as chosen under **Network**) |
 | 7 | Subtitles | the uploader's English / Chinese subtitles come down with the sound into `captions/` and are used instead of Whisper |
-| 8 | Checked whole | every downloaded file's length is compared with the video's: a download can end early while saying all went well (an 82-minute film once came back as 25 s of picture and 60 s of sound). A short file is deleted and downloaded again with yt-dlp's own downloader in 10 MB requests; a short `input.mp4` from an earlier try is never reused |
-| ✗ | When it fails | the reason in plain words with what to do (network blocked, sign-in, private, removed, blocked in your country, unsupported link, live stream), then yt-dlp's own last error line; a download where nothing comes through for 5 minutes is stopped |
+| 8 | Checked whole | every downloaded file's length is compared with the video's: a download can end early while saying all went well (an 82-minute film once came back as 25 s of picture and 60 s of sound). A short file is deleted and downloaded again with fresh addresses (still over 8 connections), and only after a second short file with yt-dlp's own downloader in 10 MB requests (one connection: on networks that slow each connection down it measured ~2 KB/s against ~3.6 MB/s with aria2c); a short `input.mp4` from an earlier try is never reused |
+| ✗ | When it fails | the reason in plain words with what to do (network blocked, sign-in, private, removed, blocked in your country, unsupported link, live stream), then yt-dlp's own last error line; a download where nothing comes through for 4 minutes (aria2c keeps printing `DL:0B` then) is reconnected with fresh addresses and goes on where it stopped, up to 5 times |
 
 **Long videos (up to 4 hours and more).** Before downloading, the free disk space is checked against the video's
 length (about 25 GB for 4 hours at 1080p: the download, the work files and the export). The site's download
 addresses expire after some hours (YouTube's after ~6): when the site starts answering "403 Forbidden", the download
 is stopped at once, the site is asked for new addresses, and it goes on where it stopped (an hour-old answer is
-renewed before a download even starts). Waits between retries grow from 1 s to 8 s at most. Unfinished pieces of
+renewed before a download even starts). Waits between retries grow from 1 s to 8 s at most. Progress shows the file size, speed and time left (`Downloading video 40% of 3.0GiB · 3.5MiB/s · 9m35s left`); the free-space check also uses the file size the site gives (plain `.mp4` links often have no length), and the picture and sound are merged without a second pass over the file. Unfinished pieces of
 streamed videos are an error, never silently left out. The dubbed lines are lined up on disk, not in memory
 (a 4-hour film: 0.12 GB instead of 2.5 GB).
 

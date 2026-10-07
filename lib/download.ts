@@ -117,7 +117,7 @@ export function explain(raw: string, url: string, net: NetworkSettings): string 
   const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "the site"; } })();
   const last = raw.split(/\r?\n/).filter((l) => /^ERROR:/.test(l)).pop()?.replace(/^ERROR:\s*/, "") ?? raw.trim().split(/\r?\n/).pop() ?? "";
   const detail = `\n\nDetails: ${last.slice(0, 400)}`;
-  const slow = /timed out|Timeout|Connection (reset|refused|aborted)|RemoteDisconnected|getaddrinfo|Name or service|Unable to download (webpage|API)|TransportError|ConnectionError|WinError 100(5|6)\d|Failed to resolve|SSL/i.test(raw);
+  const slow = /timed out|Timeout|no data for minutes|Connection (reset|refused|aborted)|RemoteDisconnected|getaddrinfo|Name or service|Unable to download (webpage|API)|TransportError|ConnectionError|WinError 100(5|6)\d|Failed to resolve|SSL/i.test(raw);
   const network = `This network blocks or slows down video sites (on some office networks google.com works but `
     + `YouTube, TikTok and Facebook don't). Try another internet connection (phone hotspot, home Wi-Fi), `
     + `${net.proxy ? "check your proxy" : "set a proxy / VPN under Network"}, or download the video another way and use Upload file.`;
@@ -152,7 +152,8 @@ const loginUnusable = (raw: string) => /cookie|could not (copy|find|decrypt)|DPA
 // ---------------------------------------------------------------- 4. info: what the link holds
 
 type Info = { title?: string; duration?: number; extractor_key?: string; extractor?: string; thumbnail?: string; _type?: string;
-  formats?: { vcodec?: string; acodec?: string }[] };
+  filesize?: number; filesize_approx?: number;
+  formats?: { vcodec?: string; acodec?: string; width?: number; height?: number; filesize?: number; filesize_approx?: number }[] };
 
 const hostOf = (url: string) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "the site"; } };
 
@@ -214,7 +215,8 @@ function fastArgs(safe = false): string[] {
   if (safe) args.push("--http-chunk-size", "10M");
   else if (fs.existsSync(aria)) {
     args.push("--downloader", aria, "--downloader", "dash,m3u8:native", "--downloader-args",
-      "aria2c:-c -x 8 -s 8 -k 1M --file-allocation=none --max-tries=20 --retry-wait=2 --timeout=30 --connect-timeout=30 "
+      // 64 MB write cache: a 3 GB file over 8 connections is written in far fewer, larger pieces
+      "aria2c:-c -x 8 -s 8 -k 1M --file-allocation=none --disk-cache=64M --max-tries=20 --retry-wait=2 --timeout=30 --connect-timeout=30 "
       + "--summary-interval=1 --console-log-level=warn --download-result=hide");
   }
   return args;
@@ -248,6 +250,8 @@ export async function download(url: string, jd: string, report: Report, maxRes =
 
 /** What a site answers to an expired download address (yt-dlp, aria2c). */
 const EXPIRED = /HTTP Error 40[13]|HTTP Error 410|403 Forbidden|status=40[13]|errorCode=(22|24)|addresses expired|URL.*expired/i;
+/** Nothing coming in for this long: the connections are dead (often: the addresses stopped working); renew them. */
+const STALL = 4 * 60_000;
 
 // Files from an earlier start (a paste, or a first try) are used again: what the site said, and finished downloads
 const INFO_TTL = 4 * 3600_000; // the site's download addresses stop working after some hours
@@ -279,7 +283,7 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
   } else await refresh();
   info = info!;
   onInfo?.(info);
-  checkDisk(jd, Number(info.duration) || 0, soundOnly ? 0 : maxRes);
+  checkDisk(jd, info, soundOnly ? 0 : maxRes);
   if (!soundOnly && infoAge() > 3600_000) await refresh(); // a long download ahead: start with fresh addresses
   const title = String(info.title ?? "video");
   const formats = info.formats ?? [];
@@ -289,14 +293,18 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
 
   // progress of both parts together: the picture is most of the bytes
   const pct = { sound: 0, picture: split ? 0 : 1 }, speed = { sound: "", picture: "" };
+  // how big the file is and how long it still takes ("3.0GiB", "9m35s"): a 3 GB film can take an hour
+  const size = { sound: "", picture: "" }, left = { sound: "", picture: "" };
   let watching = true, handedOff = false;
   const show = () => {
     if (!watching) return;
     const f = split ? 0.15 * pct.sound + 0.85 * pct.picture : pct.sound;
     const sp = [speed.sound, speed.picture].filter(Boolean).join(" + ");
+    const big = split ? "picture" : "sound"; // the part with most of the bytes
+    const tail = `${size[big] ? ` of ${size[big]}` : ""}${sp ? ` · ${sp}` : ""}${left[big] ? ` · ${left[big]} left` : ""}`;
     report("download", f, split && pct.sound >= 1
-      ? `${handedOff ? "Finishing the video download" : "Sound ready, picture"} ${Math.round(pct.picture * 100)}%${sp ? ` · ${sp}` : ""}`
-      : `Downloading video ${Math.round(f * 100)}%${sp ? ` · ${sp}` : ""}`);
+      ? `${handedOff ? "Finishing the video download" : "Sound ready, picture"} ${Math.round(pct.picture * 100)}%${tail}`
+      : `Downloading video ${Math.round(f * 100)}%${tail}`);
   };
 
   /**
@@ -321,9 +329,10 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
   const fetchOnce = async (part: "sound" | "picture", args: string[], name: string, wanted: RegExp, safe: boolean) => {
     const done = fs.readdirSync(jd).find((n) => wanted.test(n)); // finished before (a paste, or a first try)
     if (done && await whole(path.join(jd, done))) { pct[part] = 1; show(); return path.join(jd, done); }
-    let out = "", file = "", refused = 0;
-    // "403 Forbidden" over and over: the addresses expired, and retrying them is no use - stop, renew, go on
-    const expired = new AbortController();
+    let out = "", file = "", refused = 0, stalled = false, moved = Date.now();
+    // "403 Forbidden" over and over: the addresses expired, and retrying them is no use - stop, renew, go on.
+    // Nothing coming in for minutes: the same (aria2c keeps printing "DL:0B" then, so the idle timeout never fires)
+    const stop = new AbortController();
     try {
       await run(tool("yt-dlp"), [
         "--load-info-json", infoFile, ...baseArgs(net, browser), ...fastArgs(safe), "--progress",
@@ -332,26 +341,35 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
         "-o", path.join(jd, `${name}.%(ext)s`), "--print", "after_move:FILE:%(filepath)s", "--no-quiet",
       ], {
         idleTimeout: 5 * 60_000,
-        signal: expired.signal,
+        signal: stop.signal,
+        keepOutput: false,
         onLine: (l) => {
           out = (out + l + "\n").slice(-8000);
-          if (EXPIRED.test(l) && ++refused >= 4 && !expired.signal.aborted) expired.abort("download addresses expired");
-          // yt-dlp: "[download]  12.3% of 50MiB at 1.2MiB/s"; aria2c: "[#2089b0 1.2MiB/33MiB(3%) CN:8 DL:2.1MiB ETA:15s]"
-          const y = l.match(/\[download\]\s+([\d.]+)%(?:.*?\bat\s+(\S+\/s))?/), a = l.match(/\((\d+)%\).*?DL:(\S+)/);
+          if (EXPIRED.test(l) && ++refused >= 4 && !stop.signal.aborted) stop.abort("download addresses expired");
+          // yt-dlp: "[download]  12.3% of ~ 50MiB at 1.2MiB/s ETA 00:35";
+          // aria2c: "[#2089b0 1.2MiB/33MiB(3%) CN:8 DL:2.1MiB ETA:15s]"
+          const y = l.match(/\[download\]\s+([\d.]+)%(?:\s+of\s+~?\s*([\d.]+\w*B))?(?:.*?\bat\s+(\S+\/s))?(?:.*?\bETA\s+([\d:]+))?/);
+          const a = l.match(/\/([\d.]+\w*B)\((\d+)%\).*?DL:([\d.]+\w*B)(?:\s+ETA:(\w+))?/);
           if ((y || a) && !/\.(srt|vtt)\b/.test(l)) {
             // streamed formats guess their size at first ("100% of ~1KiB"): their piece count is what's reliable
             const frag = l.match(/\(frag (\d+)\/(\d+)\)/);
-            const now = frag ? +frag[1] / Math.max(1, +frag[2]) : Number(y ? y[1] : a![1]) / 100;
+            const now = frag ? +frag[1] / Math.max(1, +frag[2]) : Number(y ? y[1] : a![2]) / 100;
+            const sp = y ? y[3] : `${a![3]}/s`;
+            if (now > pct[part] || (sp && !/^(0(\.0+)?\w?B|Unknown)/.test(sp))) moved = Date.now();
             pct[part] = Math.max(pct[part], Math.min(frag ? 0.99 : 1, now)); // never backwards (pieces report one by one)
-            speed[part] = (y ? y[2] : a && `${a[2]}/s`) || speed[part];
+            speed[part] = sp || speed[part];
+            if (!frag) size[part] = (y ? y[2] : a![1]) || size[part];
+            left[part] = (y ? y[4] : a![4]) || "";
             show();
           }
           const r = l.match(/Retrying \((?:attempt )?(\d+)\/(\d+)\)/i);
           if (r) report("download", 0, `Slow connection to ${host} - trying again (${r[1]}/${r[2]})`);
           if (l.startsWith("FILE:")) file = l.slice(5).trim();
+          if (Date.now() - moved > STALL && !stop.signal.aborted) { stalled = true; stop.abort("no data for minutes"); }
         },
       });
     } catch (e) { out += "\n" + (e as Error).message; }
+    if (stalled) throw Object.assign(new Error(explain(out, url, net)), { raw: "STALLED\n" + out });
     if (!file || !fs.existsSync(file)) { // the printed path can be missing on some sites: look for the file itself
       const f = fs.readdirSync(jd).find((n) => wanted.test(n));
       if (f) file = path.join(jd, f);
@@ -365,17 +383,31 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
     show();
     return file;
   };
-  /** fetchOnce, again with fresh addresses when the site says the old ones expired; it goes on where it stopped. */
+  /**
+   * fetchOnce, again with fresh addresses when the site says the old ones expired or nothing came in for minutes;
+   * it goes on where it stopped.
+   */
   const fetchPart = async (part: "sound" | "picture", args: string[], name: string, wanted: RegExp) => {
-    let safe = false;
+    let safe = false, short = 0, stalls = 0;
     for (let attempt = 0; ; attempt++) {
       try { return await fetchOnce(part, args, name, wanted, safe); } catch (e) {
         const raw = (e as { raw?: string }).raw ?? "";
+        if (raw.startsWith("STALLED")) { // a long download may stall a few times: its own count
+          if (++stalls > 5) throw e;
+          attempt--;
+          report("download", pct[part], `The ${part} download stopped moving - reconnecting to ${host}`);
+          await refresh();
+          continue;
+        }
         if (attempt >= 3) throw e;
-        if (raw.startsWith("INCOMPLETE")) { // came back short: again, from the start, with yt-dlp's own downloader
-          report("download", 0, `The ${part} came back incomplete - downloading it again, more carefully`);
-          safe = true;
+        if (raw.startsWith("INCOMPLETE")) {
+          // came back short: again from the start - first over 8 connections with fresh addresses, then with
+          // yt-dlp's own downloader (one connection: on networks that slow each connection down that is ~1000×
+          // slower - we measured 2 KB/s against 3.6 MB/s - so it is the last resort, not the first)
+          safe = ++short >= 2;
+          report("download", 0, `The ${part} came back incomplete - downloading it again${safe ? ", more carefully" : ""}`);
           await dropPartials(name);
+          if (!safe) await refresh();
         } else if (EXPIRED.test(raw)) {
           report("download", pct[part], `The download address expired - asking ${host} for a new one`);
           await refresh();
@@ -409,8 +441,10 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
   const video = picture.then(async (pic) => {
     if (watching) report("download", 1, "Putting picture and sound together");
     const out = path.join(jd, "input.mp4");
+    // no +faststart: it writes the whole file a second time (3 GB more), and the player seeks with ranges anyway;
+    // output.mp4 gets it at export
     const merge = (audio: string[]) => run(tool("ffmpeg"), ["-y", "-v", "error", "-i", pic, "-i", sound,
-      "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, "-movflags", "+faststart", out]);
+      "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, out]);
     // the sound as it is; re-encoded only when mp4 can't hold it (rare)
     await merge(["-c:a", "copy"]).catch(() => merge(["-c:a", "aac", "-b:a", "192k"]));
     await fsp.rm(pic, { force: true });
@@ -508,16 +542,20 @@ async function adopt(p: Prefetch, jd: string, report: Report) {
 /**
  * Stops before hours of downloading when the drive is too full for the video: the download itself, the exported
  * video (about as big) and the work files (separated voices and music, ~1 GB an hour). Picture 0: sound only.
+ * When the site says how big the file is, that counts too: plain file links (a 3 GB .mp4) often give no length.
  */
-function checkDisk(jd: string, seconds: number, picture: number) {
-  if (!seconds) return;
+function checkDisk(jd: string, info: Info, picture: number) {
+  const seconds = Number(info.duration) || 0;
   const perSec = picture >= 1080 ? 700e3 : picture >= 720 ? 350e3 : picture ? 160e3 : 0; // bytes/s of picture
-  const need = seconds * (2 * perSec + 300e3);
+  const sizes = picture ? [info, ...(info.formats ?? []).filter((f) => f.vcodec !== "none"
+    && Math.min(f.width || f.height || 0, f.height || f.width || 0) <= picture)].map((f) => f.filesize || f.filesize_approx || 0) : [];
+  const need = Math.max(seconds * (2 * perSec + 300e3), 2.2 * Math.max(0, ...sizes));
+  if (!need) return;
   try {
     const s = fs.statfsSync(jd), free = s.bavail * s.bsize;
     if (free < need) {
       const gb = (n: number) => (n / 1e9).toFixed(1);
-      throw new Error(`Not enough disk space for this ${Math.round(seconds / 60)}-minute video: about ${gb(need)} GB is needed, `
+      throw new Error(`Not enough disk space for this ${seconds ? `${Math.round(seconds / 60)}-minute ` : ""}video: about ${gb(need)} GB is needed, `
         + `${gb(free)} GB is free. Free some space (or choose a smaller Export size) and try again.`);
     }
   } catch (e) { if ((e as Error).message.startsWith("Not enough")) throw e; } // statfs missing: no check

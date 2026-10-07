@@ -41,9 +41,11 @@ export function tool(name: "ffmpeg" | "ffprobe" | "yt-dlp" | "whisper-cli"): str
 /**
  * idleTimeout: stop the program when it prints nothing for this many ms (e.g. a download stuck on a blocked network).
  * signal: stop it on request (e.g. a download whose addresses expired: retrying them is no use).
+ * keepOutput: false reads stdout only line by line (onLine) instead of keeping it (hours of download progress).
  */
 type RunOpts = {
   cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; idleTimeout?: number; signal?: AbortSignal;
+  keepOutput?: boolean;
 };
 
 /** Run a program; resolves with stdout. Rejects with the tail of stderr on failure. */
@@ -74,7 +76,7 @@ export function run(cmd: string, args: string[], opts: RunOpts = {}): Promise<Bu
     alive();
     const onAbort = () => stop();
     opts.signal?.addEventListener("abort", onAbort, { once: true });
-    p.stdout.on("data", (c: Buffer) => { out.push(c); lines(c); alive(); });
+    p.stdout.on("data", (c: Buffer) => { if (opts.keepOutput !== false) out.push(c); lines(c); alive(); });
     p.stderr.on("data", (c: Buffer) => { err = (err + c.toString("utf8")).slice(-4000); lines(c); alive(); });
     p.on("error", (e) => { clearTimeout(idle); reject(e); });
     p.on("close", (code) => {
