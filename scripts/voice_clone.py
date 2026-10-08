@@ -24,8 +24,12 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEED_VC = os.path.join(ROOT, "py", "src", "seed-vc")
-os.environ.setdefault("HF_HOME", os.path.join(ROOT, "models", "hf"))
-os.environ.setdefault("TORCH_HOME", os.path.join(ROOT, "models", "torch"))
+# Always this folder's models, even when the PC sets its own model folders for other AI apps (otherwise the
+# models setup put here would be downloaded a second time there).
+for _var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "HF_HUB_OFFLINE"):
+    os.environ.pop(_var, None)
+os.environ["HF_HOME"] = os.path.join(ROOT, "models", "hf")
+os.environ["TORCH_HOME"] = os.path.join(ROOT, "models", "torch")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TQDM_DISABLE", "1")
 sys.path.insert(0, SEED_VC)

@@ -20,8 +20,11 @@ async function worker<T>(cmd: string, jd: string, req: object, onProgress: (frac
   await fsp.rm(resFile, { force: true });
   const tmp = path.join(PY_DIR, "tmp"); // keep big temp files next to the models, not on the system drive
   await fsp.mkdir(tmp, { recursive: true });
+  // without the PC's own Python settings (e.g. Anaconda's PYTHONPATH): they would load other versions of the packages
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of Object.keys(env)) if (/^(PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE)$/i.test(k)) delete env[k];
   await run(PYTHON, ["-u", SCRIPT, cmd, reqFile, resFile], {
-    env: { ...process.env, TMP: tmp, TEMP: tmp, PYTHONIOENCODING: "utf-8" },
+    env: { ...env, TMP: tmp, TEMP: tmp, PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1" },
     onLine: (l) => {
       const m = l.match(/^PROGRESS (\d+) (\d+)/);
       if (m && +m[2] > 0) onProgress(+m[1] / +m[2]);

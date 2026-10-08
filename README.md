@@ -99,7 +99,7 @@ git pull
 
 ### What `start.cmd` does
 
-1. Uses the Node.js on the PC, or downloads a portable Node.js LTS into `bin\node` if there is none. npm's cache
+1. Uses the Node.js on the PC if it is 20.9 or newer, or else downloads a portable Node.js LTS into `bin\node`. npm's cache
    (`.cache\npm`) and all temporary files (`tmp\`) are kept in the project folder.
 2. Runs **`npm run setup`** – the first time, and again whenever `scripts/setup.mjs` or `package-lock.json` changed
    (it remembers a fingerprint in `.setup-done.json`). Setup is the table below.
@@ -113,10 +113,11 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 
 | # | Step | What happens | Where it goes | Size |
 |---|---|---|---|---|
-| 1 | Checks | Node.js version, free disk space | – | – |
+| 1 | Checks | Node.js version, free disk space; removes leftovers of interrupted runs | – | – |
+|   | **Visual C++ runtime** | installed when missing (whisper.cpp and PyTorch need it; Windows asks for permission once) | Windows | small |
 |   | Node packages | `npm install` (Next.js, React, msedge-tts) | `node_modules/` | ~0.5 GB |
 | 2 | **ffmpeg** | **downloaded**: gyan.dev's full build (`.zip` from GitHub; it has rubberband and draws Khmer subtitles correctly – other builds don't), or copied in if that build is already on the PC | `bin/` | ~0.4 GB |
-| 3 | **whisper.cpp** | speech recognition program (newest Windows build) | `bin/whisper/` | small |
+| 3 | **whisper.cpp** | speech recognition program (newest Windows build); only the 2 programs the app uses are kept | `bin/whisper/` | small |
 |   | **yt-dlp** | downloads videos from links (updates itself once a day) | `bin/yt-dlp.exe` | small |
 |   | **aria2c** | downloads each video file over 8 connections at once | `bin/aria2c.exe` | small |
 |   | **Deno** | runs YouTube's JavaScript for yt-dlp (without it: 480p at most, or "not a bot" errors) | `bin/deno.exe` | ~0.1 GB |
@@ -126,9 +127,17 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 | 6 | Voice cloning packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, OpenVINO 2026.4.1, transformers 4.57.6, librosa, … – **exact tested versions** | `py/venv/` | ~1.5 GB |
 |   | Seed-VC | voice conversion code, pinned to the tested version (downloaded as a zip, git not needed) | `py/src/seed-vc/` | small |
 |   | Voice models | MDX-Net Kim Vocal 2 + Demucs (voice/music separation), Seed-VC, Whisper-small, BigVGAN | `models/hf/` | ~2.7 GB |
-| 7 | Build | `npm run build` | `.next/` | small |
+| 7 | **Duplicates** | removes older versions of a model, second copies and anything the app does not use: other `ggml-*.bin` files, old voice-model versions, Node packages not in `package-lock.json`, a second version of a Python package, OpenVINO's compiled model after an OpenVINO upgrade, the portable Node.js once the PC's own is new enough | – | frees space |
+| 8 | Build | `npm run build` | `.next/` | small |
 
-Temporary files and download caches stay in the folder too (`tmp/`, `.cache/npm/`, `py/tmp/`, `py/cache/`).
+Temporary files and download caches stay in the folder too (`tmp/`, `.cache/npm/`, `py/tmp/`); pip's download
+cache (`py/cache/`) is deleted once the packages are installed.
+
+**Setup repairs itself.** Every time it runs it checks that each program actually starts, not only that it is
+there: a program that does not start is downloaded again, a broken `node_modules` is reinstalled with `npm ci`, a
+broken Python environment is rebuilt, and a project folder that was moved or copied to another drive or PC gets
+its Python environment pointed at the new place. Half-finished downloads (`*.part`) are thrown away, and a
+download that fails is tried again (3 times).
 
 ### Setup options
 
@@ -140,6 +149,7 @@ npm run setup                   # everything (recommended)
 npm run setup -- --no-clone     # no Python, ~5 GB less: AI voices only, and the original voices can only be lowered, not removed
 npm run setup -- --all          # also the medium + small Whisper models (faster, less accurate recognition)
 npm run setup -- --no-build     # skip the build at the end
+npm run setup -- --clean        # reinstall all programs and packages from scratch (keeps the downloaded models)
 ```
 
 `--no-clone` can be undone later: just run `npm run setup` again.
@@ -148,7 +158,9 @@ npm run setup -- --no-build     # skip the build at the end
 
 | Message | What to do |
 |---|---|
-| `Node.js 20.9 or newer is needed` | your Node.js is too old: install the current LTS from <https://nodejs.org>, then run `start.cmd` again |
+| `Node.js 20.9 or newer is needed` | you ran `npm run setup` with an old Node.js: use `start.cmd` (it brings its own Node.js), or install the current LTS from <https://nodejs.org> |
+| `whisper-cli failed (code 3221225781)` | a DLL is missing (the Visual C++ runtime): run `start.cmd` again – setup installs it – or install <https://aka.ms/vs/17/release/vc_redist.x64.exe> |
+| Anything else that keeps failing | `npm run setup -- --clean`, then `start.cmd` – reinstalls everything except the big model downloads |
 | A download of ffmpeg, Python or Node.js failed | check the internet connection and run `start.cmd` again; or put `ffmpeg.exe` + `ffprobe.exe` into `bin\`, or set `$env:PYTHON` to a Python 3.12 |
 | `running scripts is disabled on this system` | you ran `start.ps1` directly – use `start.cmd` instead |
 | `Only X GB free on D:\` | free some space, or move the project folder to a bigger drive and run `start.cmd` there |

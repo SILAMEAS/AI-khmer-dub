@@ -19,7 +19,14 @@ $tmp = Join-Path $PSScriptRoot "tmp"
 New-Item -ItemType Directory -Force $tmp | Out-Null
 $env:TEMP = $tmp; $env:TMP = $tmp
 $ownNode = Join-Path $PSScriptRoot "bin\node"
-if (Test-Path (Join-Path $ownNode "node.exe")) { $env:Path = "$ownNode;$env:Path" }
+# Node.js 20.9+ is what Next.js needs
+function Test-NodeOk {
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { return $false }
+  try { $v = [version]((& node -v) -replace "^v", "") } catch { return $false }
+  return $v -ge [version]"20.9"
+}
+$pcNodeOk = Test-NodeOk  # the PC's own Node.js, checked before the portable one is put first
+if (-not $pcNodeOk -and (Test-Path (Join-Path $ownNode "node.exe"))) { $env:Path = "$ownNode;$env:Path" }
 
 # Already running (e.g. start.cmd double-clicked twice)? Just show it.
 try {
@@ -29,8 +36,19 @@ try {
   exit 0
 } catch { }
 
-# 1. Node.js: the one on the PC, or else a portable one downloaded into bin\node (nothing installed on C:)
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+# The PC's own Node.js is new enough (e.g. updated since): the portable copy is a duplicate
+if ($pcNodeOk -and (Test-Path $ownNode)) {
+  Write-Host "Removing the portable Node.js in bin\node - the one on this PC is new enough."
+  Remove-Item -Recurse -Force $ownNode -ErrorAction SilentlyContinue
+}
+
+# 1. Node.js: the one on the PC if it is new enough, or else a portable one downloaded into bin\node
+#    (nothing installed on C:)
+if (-not (Test-NodeOk)) {
+  if (Get-Command node -ErrorAction SilentlyContinue) {
+    Write-Host "The Node.js on this PC ($(& node -v)) is too old - using a portable one instead (your own stays as it is)."
+  }
+  Remove-Item -Recurse -Force $ownNode -ErrorAction SilentlyContinue  # an old or broken portable one
   Write-Host "Downloading Node.js LTS into bin\node..."
   try {
     $ProgressPreference = "SilentlyContinue" # Windows PowerShell's progress bar makes downloads very slow
@@ -39,13 +57,14 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     $zip = Join-Path $tmp "node.zip"
     Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$lts/node-$lts-win-x64.zip" -OutFile $zip
     $unpacked = Join-Path $tmp "node-unpacked"
+    Remove-Item -Recurse -Force $unpacked -ErrorAction SilentlyContinue  # left from an interrupted try
     & "$env:SystemRoot\System32\tar.exe" -xf $zip -C (New-Item -ItemType Directory -Force $unpacked).FullName
     New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "bin") | Out-Null
     Move-Item (Get-ChildItem $unpacked -Directory | Select-Object -First 1).FullName $ownNode
     Remove-Item -Recurse -Force $unpacked, $zip
     $env:Path = "$ownNode;$env:Path"
   } catch { }
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+  if (-not (Test-NodeOk)) {
     Stop-WithMessage "Node.js could not be downloaded. Check the internet connection, or install it from https://nodejs.org, then run start.cmd again."
   }
 }
