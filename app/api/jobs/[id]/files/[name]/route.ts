@@ -1,5 +1,4 @@
 import { fs, path } from "@/lib/rt";
-import { VOICES_DIR } from "@/lib/clone";
 import { jobDir, jobs } from "@/lib/jobs";
 import { fileStream } from "@/lib/limits"; // stops quietly when the player cancels a range request
 
@@ -31,14 +30,12 @@ const VIDEO_TYPES: Record<string, string> = { ".mp4": "video/mp4", ".m4v": "vide
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; name: string }> }) {
   const { id, name } = await params;
   const job = jobs.get(id);
-  const sample = /^speaker_\d+\.wav$/.test(name); // voice sample of each person found in the video
   const source = name === "source" && job?.meta; // the video being dubbed (after the cut), for the editor's player
   // the .srt downloads match the exported video: in its time when parts were cut, the speed changed or an intro added
   const exported = name.endsWith(".srt") ? path.join(jobDir(id), name.replace(".srt", ".export.srt")) : "";
-  const file = sample ? path.join(jobDir(id), VOICES_DIR, name)
-    : source ? path.join(jobDir(id), job.meta!.input)
+  const file = source ? path.join(jobDir(id), job.meta!.input)
     : exported && fs.existsSync(exported) ? exported : path.join(jobDir(id), name);
-  if (!job || !(FILES[name] || sample || source) || !fs.existsSync(file)) {
+  if (!job || !(FILES[name] || source) || !fs.existsSync(file)) {
     return Response.json({ detail: "File not ready" }, { status: 404 });
   }
   const [type, suffix] = source ? [VIDEO_TYPES[path.extname(file).toLowerCase()] ?? "video/mp4", path.extname(file)]

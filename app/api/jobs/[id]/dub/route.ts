@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 type Body = {
   voice?: string; match?: boolean; rate?: number; bgMode?: string; burn?: boolean; sub?: unknown; logo?: unknown;
   out?: unknown; mix?: unknown; fx?: unknown; edit?: unknown;
-  segments?: { i: number; km: string; voice?: string; speaker?: number }[];
+  segments?: { i: number; km: string; voice?: string }[];
 };
 
 /** Generate (or regenerate) the Khmer voice, optionally with edited lines or another voice. */
@@ -44,8 +44,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (!segs[e.i]) continue;
       segs[e.i].km = String(e.km).trim();
       if (e.voice && Object.hasOwn(VOICES, e.voice)) segs[e.i].voice = e.voice as Voice;
-      const known = job.meta.speakers ?? 0;
-      if (Number.isInteger(e.speaker) && e.speaker! >= 0 && e.speaker! < known) segs[e.i].speaker = e.speaker;
     }
     saveSegments(jobDir(job.id), segs);
   }

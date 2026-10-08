@@ -16,11 +16,11 @@ const MAX_ZOOM = 30;
  * One subtitle line on its track. A long video has thousands: each is only drawn again when it changes itself
  * (its text, selected, the zoom), not when another line is typed in.
  */
-const SubClip = memo(function SubClip({ s, i, pps, speakers, on, edited, onPick }: {
-  s: Segment; i: number; pps: number; speakers: number; on: boolean; edited: boolean; onPick: (i: number, t: number) => void;
+const SubClip = memo(function SubClip({ s, i, pps, on, edited, onPick }: {
+  s: Segment; i: number; pps: number; on: boolean; edited: boolean; onPick: (i: number, t: number) => void;
 }) {
   return (
-    <div className={`tl-clip sub ${speakers ? `spk s${(s.speaker ?? 0) % 6}` : ""} ${on ? "on" : ""} ${s.km.trim() ? "" : "empty"}`}
+    <div className={`tl-clip sub ${on ? "on" : ""} ${s.km.trim() ? "" : "empty"}`}
       style={{ left: s.start * pps, width: Math.max(4, (s.end - s.start) * pps - 1) }} title={`${clock(s.start)} ${s.km}`}
       onPointerDown={(e) => { e.stopPropagation(); onPick(i, s.start); }}>
       {edited && <i className="dot" title="Edited: its voice is made again in a moment" />}
@@ -45,11 +45,11 @@ function Head({ playhead, pps, zoom, scroller, onDrag }: {
 }
 
 export const Timeline = memo(function Timeline({ duration, playhead, onSeek, segs, edited, selected, onSelect, parts, selectedPart, onSelectPart,
-  trim, onTrim, speakers, cuts, selectedCut, onSelectCut, marks, stickers, selectedSticker, onSelectSticker }: {
+  trim, onTrim, cuts, selectedCut, onSelectCut, marks, stickers, selectedSticker, onSelectSticker }: {
   duration: number; playhead: Playhead; onSeek: (t: number) => void;
   segs: Segment[] | null; edited: Set<number>; selected: number | null; onSelect: (i: number | null) => void;
   parts: Part[]; selectedPart: number | null; onSelectPart: (i: number | null) => void;
-  trim: { from: number; to: number } | null; onTrim?: (t: { from: number; to: number }) => void; speakers: number;
+  trim: { from: number; to: number } | null; onTrim?: (t: { from: number; to: number }) => void;
   /** parts cut out of the video, the In / Out marks for the next cut, stickers */
   cuts: Range[]; selectedCut: number | null; onSelectCut: (i: number | null) => void;
   marks: { in: number | null; out: number | null };
@@ -173,7 +173,7 @@ export const Timeline = memo(function Timeline({ duration, playhead, onSeek, seg
             </div>
             <div className="tl-track">
               {segs?.map((s, i) => (
-                <SubClip key={i} s={s} i={i} pps={pps} speakers={speakers} on={selected === i} edited={edited.has(i)} onPick={pick} />
+                <SubClip key={i} s={s} i={i} pps={pps} on={selected === i} edited={edited.has(i)} onPick={pick} />
               ))}
             </div>
             <div className="tl-track">

@@ -2,9 +2,8 @@
 
 Upload a Chinese or English video (or paste a link) and get back:
 
-- 🎬 the video dubbed in Khmer, either
-  - 🧬 **in each person's own voice** (voice cloning: a child stays a child, grandma stays grandma), or
-  - with a **Khmer AI voice**: 🎭 auto (boy or girl per line, like the original speaker), 👦 boy (Piseth) or 👧 girl (Sreymom)
+- 🎬 the video dubbed in Khmer with a **Khmer AI voice**: 🎭 auto (boy or girl per line, like the original speaker),
+  👦 boy (Piseth) or 👧 girl (Sreymom)
 - 📝 **Khmer subtitles** as a `.srt` file and as a selectable track, optionally burned into the picture
   in your own style (any Khmer font – also your own .ttf/.otf –, size, colours, outline or box, top or bottom)
 - 🏷️ **your logo** sliding across the picture once a minute (or every 30 s … 5 min)
@@ -13,7 +12,9 @@ Upload a Chinese or English video (or paste a link) and get back:
   at 1080p / 720p / 480p
 - 🔊 a **sound mix you control**: the original voices removed (or kept quietly), music level, Khmer voice level and
   sound, your own background music, other levels for parts of the video – normalised to −14 LUFS like YouTube plays
-- ✨ CapCut-style **effects**: cover the subtitles already in the video, filters (Vivid, Warm, Cool, Cinematic,
+- 🧽 the **subtitles and logo already in the video removed** – found automatically, filled in from the picture
+  around them (or blurred, or covered)
+- ✨ CapCut-style **effects**: filters (Vivid, Warm, Cool, Cinematic,
   Vintage, Black & white), brightness / contrast / saturation, sharpen, mirror, fade in & out, a progress bar,
   your text on the picture (channel name, episode) and animated subtitles (fade or pop)
 - 📝 the original-language `.srt`, plus the Khmer audio on its own
@@ -36,7 +37,7 @@ Upload a Chinese or English video (or paste a link) and get back:
 
 ### Step 1 – Get the code (once)
 
-Open **PowerShell**, go to the drive with the most free space (the app downloads ~9 GB into its own folder,
+Open **PowerShell**, go to the drive with the most free space (the app downloads ~5 GB into its own folder,
 never onto drive C:), and clone the project:
 
 ```powershell
@@ -55,16 +56,17 @@ No git? Download the ZIP from GitHub (**Code → Download ZIP**), unzip it on dr
 
 Or **double-click `start.cmd`** in File Explorer. That's all – nothing else to install or configure by hand.
 
-The first time, it installs everything by itself (15–30 minutes, mostly downloads):
+The first time, it installs everything by itself (10–20 minutes, mostly downloads):
 
 ```text
 [1/7] Checking this PC and installing Node packages
 [2/7] ffmpeg (audio and video processing)
 [3/7] Speech recognition (whisper.cpp) and video downloader (yt-dlp)
 [4/7] Speech recognition models
-[5/7] Python for voice cloning
-[6/7] Voice cloning packages and models (~5 GB, takes a while the first time)
-[7/7] Building the app
+[5/8] Python for removing the original voices from the music
+[6/8] Voice separation packages and models (~2 GB, takes a while the first time)
+[7/8] Removing duplicates and files the app does not use
+[8/8] Building the app
 Khmer AI Dubber: http://127.0.0.1:5000
 ```
 
@@ -124,9 +126,8 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 | 4 | Speech models | Whisper `large-v3-turbo` + Silero VAD (skips music and silence) | `models/` | ~0.6 GB |
 | 5 | **Python 3.12** | a **portable** Python downloaded into the project (nothing installed in Windows); an existing environment made from a Python elsewhere is moved here | `py/python/` | ~0.1 GB |
 |   | Python environment | a private environment just for this app | `py/venv/` | – |
-| 6 | Voice cloning packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, OpenVINO 2026.4.1, transformers 4.57.6, librosa, … – **exact tested versions** | `py/venv/` | ~1.5 GB |
-|   | Seed-VC | voice conversion code, pinned to the tested version (downloaded as a zip, git not needed) | `py/src/seed-vc/` | small |
-|   | Voice models | MDX-Net Kim Vocal 2 + Demucs (voice/music separation), Seed-VC, Whisper-small, BigVGAN | `models/hf/` | ~2.7 GB |
+| 6 | Voice separation packages | PyTorch (CPU) 2.14.1, Demucs 4.1.0, OpenVINO 2026.4.1 – **exact tested versions**; packages left from older versions of the app are uninstalled | `py/venv/` | ~1 GB |
+|   | Separation models | MDX-Net Kim Vocal 2 + Demucs (voices apart from the music) | `models/` | ~0.2 GB |
 | 7 | **Duplicates** | removes older versions of a model, second copies and anything the app does not use: other `ggml-*.bin` files, old voice-model versions, Node packages not in `package-lock.json`, a second version of a Python package, OpenVINO's compiled model after an OpenVINO upgrade, the portable Node.js once the PC's own is new enough | – | frees space |
 | 8 | Build | `npm run build` | `.next/` | small |
 
@@ -142,21 +143,22 @@ download that fails is tried again (3 times).
 ### Setup options
 
 You normally don't need these: `start.cmd` runs setup for you. To choose options, add them to `start.cmd`
-(`.\start.cmd --no-clone`) or run setup yourself – `start.cmd` remembers your choice next time.
+(`.\start.cmd --no-separation`) or run setup yourself – `start.cmd` remembers your choice next time.
 
-Voice cloning is optional: if it cannot be installed (no internet, a blocked download), setup says so, the app
-starts anyway with the AI voices, and setup tries again the next time `start.cmd` runs. A setup that is already
+Removing the original voices is optional: if it cannot be installed (no internet, a blocked download), setup says
+so, the app starts anyway (the original voices are then lowered instead), and setup tries again the next time
+`start.cmd` runs. A setup that is already
 up to date takes about half a minute and works offline.
 
 ```powershell
 npm run setup                   # everything (recommended)
-npm run setup -- --no-clone     # no Python, ~5 GB less: AI voices only, and the original voices can only be lowered, not removed
+npm run setup -- --no-separation   # no Python, ~3 GB less: the original voices can only be lowered, not removed
 npm run setup -- --all          # also the medium + small Whisper models (faster, less accurate recognition)
 npm run setup -- --no-build     # skip the build at the end
 npm run setup -- --clean        # reinstall all programs and packages from scratch (keeps the downloaded models)
 ```
 
-`--no-clone` can be undone later: just run `npm run setup` again.
+`--no-separation` can be undone later: just run `npm run setup` again.
 
 ### If something goes wrong
 
@@ -203,7 +205,7 @@ merged until you press **Export**, so editing is instant.
 1. **📁 Media** – **Import video** (or drop it on the player, or paste a link), the original language, and
    *Check the translation first*. To dub only a part, drag the white **cut handles** in the timeline (or type the
    times on the right). Press **▶ Start dubbing**. Your projects are listed here too (✕ deletes one with its files).
-2. **🗣 Voice** – 🧬 *Original voices*, 🎭 *Auto*, 👦 *Boy* or 👧 *Girl*, speaking speed, *sound like the speaker*.
+2. **🗣 Voice** – 🎭 *Auto*, 👦 *Boy* or 👧 *Girl*, speaking speed, *sound like the speaker*.
    With original voices, play each **Person** found in the video.
 3. **💬 Captions** – every line, editable, with **Find / Replace all**. Click a line (here or in the timeline) to
    jump to it; on the right you can play it, edit the Khmer, change who says it (or 👦 / 👧). Edited lines get a
@@ -211,8 +213,10 @@ merged until you press **Export**, so editing is instant.
    top or bottom, animation (fade / pop), *Khmer + original*.
 4. **T Text** – text shown the whole time (channel name, episode), its corner, size and colour.
 5. **🎨 Filters** – Vivid, Warm, Cool, Cinematic, Vintage, B & W; brightness, contrast, saturation, sharpen.
-6. **✨ Effects** – **hide the original subtitles** (a blurred or solid band: move it over the old text while
-   watching), mirror, fade in & out, progress bar.
+6. **✨ Effects** – **remove the subtitles and logo already in the video**: *🔍 Find the subtitles and logo* puts a
+   band over the old subtitles and a box over each logo (or place them yourself: drag them on the player, the corner
+   resizes); each is *filled in* from the picture around it, *blurred* or covered with a *solid colour* – 📷 under the
+   player shows the exact result. Also mirror, fade in & out, progress bar.
 7. **🎵 Audio** – *Keep original sound* or *Khmer voice only*; **Original voices: Lower / Remove / Custom**
    (*Remove* is the default: the voices are separated from the music by themselves, in the background, about half
    a minute for 2 minutes of video, and the preview then plays the music without them); music level between lines
@@ -237,7 +241,6 @@ Without an NVIDIA graphics card everything runs on the processor. On a 12-core P
 | Voice | Speed |
 |---|---|
 | 🎭 Auto / 👦 Boy / 👧 Girl | ~1 minute for a 5-minute video (speech recognition alone takes ~40–60 s of that) |
-| 🧬 Original voices | ~5 s per spoken line: a 5-minute video ~8–10 minutes |
 | Editing (subtitles, logo, effects, sound) | instant – shown live in the player |
 | Update voices after editing lines | a few seconds: only the edited lines |
 | Export | measured ~35 s for a 1:47 video with burned-in subtitles (the picture is encoded again); faster when nothing on the picture changes |
@@ -258,7 +261,7 @@ Start with a short clip to try it.
 | Subtitles already there | an English / Chinese subtitle track in the file, or the uploader's subtitles on the site, are used instead of Whisper (`lib/captions.ts`) |
 | Speech → text | whisper.cpp + `large-v3-turbo` (or medium / small). Silero VAD finds where people speak (on the voices separated from the music when possible); the speech is glued together, recognised, and every word is put back at its real time – a new line at every pause; speech that came back empty is listened to again |
 | Who speaks (AI voices) | pitch of each line (YIN, `lib/voice.ts`) → boy or girl voice |
-| Original voices | MDX-Net Kim Vocal 2 (OpenVINO, on the Intel graphics + CPU) splits voices from music, Demucs when that is missing → CAMPPlus voice prints group lines by person and split a line where someone cuts in → a voice sample per person → Seed-VC re-speaks each Khmer line in that person's voice (`scripts/voice_clone.py`, `lib/clone.ts`) |
+| Voices apart from the music | MDX-Net Kim Vocal 2 (OpenVINO, on the Intel graphics + CPU), Demucs when that is missing – in the background, so the original voices can be removed (`scripts/separate.py`, `lib/stems.ts`) |
 | Translate → Khmer | Google Translate, sent in batches so lines keep their context |
 | Khmer voice | Microsoft Edge neural voices via `msedge-tts`, 8 lines in parallel; pitch moved toward the original speaker; long lines spoken faster by the voice itself |
 | Sync | each line fitted into its original time slot (ffmpeg `rubberband`, or `atempo`, at most 1.6× faster), loudness follows the original, short fades against clicks |
@@ -306,9 +309,9 @@ logins away from other programs), close Firefox, and try again.
 | Folder | Contents | In git? |
 |---|---|---|
 | `app/` | the editor (`page.tsx`; `editor/`: `Player.tsx` live preview, `Timeline.tsx`, `look.tsx` picture settings, `sound.tsx` sound settings and live sound, `common.ts`) and API routes (`api/*`) | yes |
-| `lib/` | `pipeline.ts` (all processing steps), `download.ts` (video links), `captions.ts` (subtitles already in the video), `jobs.ts` (queue), `voice.ts` (pitch), `clone.ts` (voice cloning bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
+| `lib/` | `pipeline.ts` (all processing steps), `download.ts` (video links), `captions.ts` (subtitles already in the video), `jobs.ts` (queue), `voice.ts` (pitch), `stems.ts` (voice separation bridge), `branding.ts` (subtitle style, fonts, logo), `tools.ts` | yes |
 | `branding/` | your logo and uploaded fonts, used for every video | no |
-| `scripts/` | `setup.mjs` (installer), `voice_clone.py` (separation, speakers, cloning) | yes |
+| `scripts/` | `setup.mjs` (installer), `separate.py` (voices apart from the music) | yes |
 | `bin/`, `models/`, `py/` | downloaded programs (ffmpeg, whisper.cpp, yt-dlp, a portable Node.js if needed), models, the portable Python (`py/python`) and its environment (`py/venv`) – made by `npm run setup` | no |
 | `tmp/`, `.cache/` | temporary files and npm's download cache (kept off drive C:) | no |
 | `jobs/<id>/` | one folder per video you dub (input, subtitles, voices, output) – delete old ones to free space | no |

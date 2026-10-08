@@ -22,8 +22,11 @@ export type OutOpts = {
   size: 0 | 480 | 720 | 1080; quality: "high" | "standard" | "small";
   intro: boolean; outro: boolean; also: Shape[];
 };
+/** A part of the source picture, in % of its width (x, w) and height (y, h). */
+export type Area = { x: number; y: number; w: number; h: number };
 export type FxOpts = {
-  cover: boolean; coverY: number; coverH: number; coverMode: "blur" | "box"; coverColor: string;
+  cover: boolean; coverY: number; coverH: number; coverX: number; coverW: number; coverMode: "blur" | "box" | "fill";
+  coverColor: string; logoAreas: Area[]; logoAreaMode: "fill" | "blur";
   filter: "none" | "vivid" | "warm" | "cool" | "cinematic" | "vintage" | "bw";
   brightness: number; contrast: number; saturation: number; sharpen: boolean;
   mirror: boolean; fade: boolean; progress: boolean; progressColor: string;
@@ -41,7 +44,8 @@ export const DEFAULT_LOOK: Look = {
   logo: { enabled: false, size: 12, every: 60, duration: 10, position: "top", opacity: 0.9 },
   out: { aspect: "original", fit: "blur", size: 0, quality: "standard", intro: false, outro: false, also: [] },
   fx: {
-    cover: false, coverY: 78, coverH: 14, coverMode: "blur", coverColor: "#000000",
+    cover: false, coverY: 78, coverH: 14, coverX: 0, coverW: 100, coverMode: "blur", coverColor: "#000000",
+    logoAreas: [], logoAreaMode: "fill",
     filter: "none", brightness: 0, contrast: 0, saturation: 0, sharpen: false,
     mirror: false, fade: false, progress: false, progressColor: "#ff3b5c",
     title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff", zoom: "none",
@@ -279,24 +283,79 @@ export function AdjustPanel({ value, onChange }: LookProps) {
 }
 
 /** Band over the subtitles already burned into the source. */
-export function CoverPanel({ value, onChange }: LookProps) {
+/**
+ * Taking away what the source has burned into its picture: its own subtitles (a band) and logos (boxes). Found by
+ * the app (lib/detect.ts), or placed by hand - the band and the boxes are dragged on the player too.
+ */
+export function CoverPanel({ value, onChange, jobId }: LookProps & { jobId?: string }) {
   const fx = value.fx;
   const setFx = (p: Partial<FxOpts>) => onChange({ ...value, fx: { ...fx, ...p } });
+  const [finding, setFinding] = useState(false);
+  const [found, setFound] = useState("");
+  async function find() {
+    if (!jobId) return;
+    setFinding(true); setFound("");
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/detect`, { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      const { logos, subtitle } = d as { logos: Area[]; subtitle: Area | null };
+      onChange({ ...value, fx: { ...fx, logoAreas: logos.length ? logos : fx.logoAreas,
+        ...(subtitle && { cover: true, coverX: subtitle.x, coverY: subtitle.y, coverW: subtitle.w, coverH: subtitle.h }) } });
+      setFound([subtitle ? "subtitles found" : "no subtitles found",
+        logos.length ? `${logos.length} logo${logos.length > 1 ? "s" : ""} found` : "no logo found"].join(", ")
+        + (subtitle || logos.length ? " - check them on the player" : ""));
+    } catch (e) { setFound((e as Error).message); } finally { setFinding(false); }
+  }
+  const setArea = (k: number, p: Partial<Area>) => setFx({ logoAreas: fx.logoAreas.map((a, i) => (i === k ? { ...a, ...p } : a)) });
+  const pctSlider = (label: string, v: number, min: number, max: number, set: (n: number) => void) => (
+    <label className="slider-row"><span>{label}</span>
+      <input type="range" min={min} max={max} step={0.5} value={v} onChange={(e) => set(+e.target.value)} /><b>{Math.round(v)}%</b></label>
+  );
   return (
     <div className="pane">
+      <button type="button" className="btn sm" disabled={!jobId || finding} onClick={find}
+        title="Looks at the video for subtitles and a logo burned into its picture">
+        {finding ? "Looking…" : "🔍 Find the subtitles and logo"}</button>
+      {!jobId && <small className="note">Open a project to find them automatically.</small>}
+      {found && <small className="note">{found}</small>}
+
+      <h4>Original subtitles</h4>
       <label className="check"><input type="checkbox" checked={fx.cover} onChange={(e) => setFx({ cover: e.target.checked })} />
-        <span>Hide the original subtitles<small>Chinese / English text already in the picture. Move the band over it while watching the player.</small></span></label>
+        <span>Remove the subtitles in the video<small>Chinese / English text already in the picture. Drag the band on the player.</small></span></label>
       <fieldset className="pane-group" disabled={!fx.cover}>
-        <label className="slider-row"><span>Starts at</span>
-          <input type="range" min={0} max={95} value={fx.coverY} onChange={(e) => setFx({ coverY: +e.target.value })} /><b>{fx.coverY}%</b></label>
-        <label className="slider-row"><span>Height</span>
-          <input type="range" min={2} max={40} value={fx.coverH} onChange={(e) => setFx({ coverH: +e.target.value })} /><b>{fx.coverH}%</b></label>
         <div className="seg-btns">
+          <button type="button" className={fx.coverMode === "fill" ? "on" : ""} onClick={() => setFx({ coverMode: "fill" })}
+            title="Painted in from the picture around it">Fill in</button>
           <button type="button" className={fx.coverMode === "blur" ? "on" : ""} onClick={() => setFx({ coverMode: "blur" })}>Blur</button>
           <button type="button" className={fx.coverMode === "box" ? "on" : ""} onClick={() => setFx({ coverMode: "box" })}>Solid colour</button>
           {fx.coverMode === "box" && <input type="color" value={fx.coverColor} onChange={(e) => setFx({ coverColor: e.target.value })} />}
         </div>
+        {pctSlider("From the top", fx.coverY, 0, 95, (v) => setFx({ coverY: v, coverH: Math.min(fx.coverH, 100 - v) }))}
+        {pctSlider("Height", fx.coverH, 2, 50, (v) => setFx({ coverH: Math.min(v, 100 - fx.coverY) }))}
+        {pctSlider("From the left", fx.coverX, 0, 95, (v) => setFx({ coverX: v, coverW: Math.min(fx.coverW, 100 - v) }))}
+        {pctSlider("Width", fx.coverW, 5, 100, (v) => setFx({ coverW: Math.min(v, 100 - fx.coverX) }))}
       </fieldset>
+
+      <h4>Logo in the video</h4>
+      <div className="seg-btns">
+        <button type="button" className={fx.logoAreaMode === "fill" ? "on" : ""} onClick={() => setFx({ logoAreaMode: "fill" })}
+          title="Painted in from the picture around it: best for a small logo">Fill in</button>
+        <button type="button" className={fx.logoAreaMode === "blur" ? "on" : ""} onClick={() => setFx({ logoAreaMode: "blur" })}>Blur</button>
+      </div>
+      {fx.logoAreas.map((a, k) => (
+        <div key={k} className="row nowrap">
+          <span>Logo {k + 1} <small>({Math.round(a.x)}%, {Math.round(a.y)}%)</small></span>
+          <button type="button" className="btn ghost sm" onClick={() => setArea(k, { w: Math.min(a.w + 2, 100 - a.x), h: Math.min(a.h + 2, 100 - a.y) })} title="A little bigger">＋</button>
+          <button type="button" className="btn ghost sm" onClick={() => setArea(k, { w: Math.max(1, a.w - 2), h: Math.max(1, a.h - 2) })} title="A little smaller">－</button>
+          <button type="button" className="btn ghost sm" onClick={() => setFx({ logoAreas: fx.logoAreas.filter((_, i) => i !== k) })} title="Remove this box">✕</button>
+        </div>
+      ))}
+      {fx.logoAreas.length < 4 && (
+        <button type="button" className="btn ghost sm" onClick={() => setFx({ logoAreas: [...fx.logoAreas, { x: 80, y: 4, w: 16, h: 10 }] })}>
+          + Add a logo box</button>
+      )}
+      <small className="note">Drag a box or the band on the player to move it, its corner to resize it. 📷 under the player shows the exact result.</small>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { fs, path } from "./rt";
-import { dub, editOnly, prepare, remix, render, separateVoices, type Meta, type Opts } from "./pipeline";
+import { dub, editOnly, knownVoice, prepare, remix, render, separateVoices, type Meta, type Opts } from "./pipeline";
 import { JOBS_DIR } from "./tools";
 
 export type Job = {
@@ -36,12 +36,14 @@ function init(): Store {
     if (!fs.existsSync(f)) continue;
     let job: Job;
     try {
-      job = JSON.parse(fs.readFileSync(f, "utf8"));
+      // (without a byte-order mark: Notepad or PowerShell put one in front of a file they save)
+      job = JSON.parse(fs.readFileSync(f, "utf8").replace(/^\uFEFF/, ""));
     } catch (e) { // a damaged project must not stop the app: it is left out (its files stay)
       console.error(`Skipping project ${id}: its job.json cannot be read`, e);
       continue;
     }
     job.task = undefined; // a background task does not survive a restart; it is started again when needed
+    job.opts.voice = knownVoice(job.opts.voice); // made when voice cloning was a choice: boy or girl voices now
     if (job.status === "queued" || job.status === "running") {
       Object.assign(job, { status: "error", error: "Server restarted while this job was running" });
     }

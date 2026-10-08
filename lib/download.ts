@@ -563,8 +563,20 @@ const PREFETCH_KEEP = 2 * 3600_000;
 const PREFETCH_MAX = 3;
 const g = globalThis as unknown as { __khmerPrefetch?: Map<string, Prefetch> };
 const prefetches = (g.__khmerPrefetch ??= (() => {
-  // left from before a restart; a locked file (open in Explorer) must not stop the app from starting
-  try { fs.rmSync(PREFETCH_DIR, { recursive: true, force: true }); } catch (e) { console.error("Could not clear jobs/_prefetch", e); }
+  // Left from before a restart. A locked file (open in Explorer, or a downloader of the last session still
+  // running - start.cmd stops those) must not stop the app from starting: tried again a few times, quietly.
+  // Only the folders there now: by the next try new links may be downloading in there.
+  let old: string[] = [];
+  try { old = fs.readdirSync(PREFETCH_DIR).map((d) => path.join(PREFETCH_DIR, d)); } catch { /* none */ }
+  const clear = (tries: number) => {
+    old = old.filter((d) => {
+      try { fs.rmSync(d, { recursive: true, force: true }); return false; } catch { return true; }
+    });
+    if (!old.length) return;
+    if (tries > 0) setTimeout(() => clear(tries - 1), 60_000).unref();
+    else console.warn(`Could not remove ${old.length} old link download(s) in jobs/_prefetch - a file there is in use`);
+  };
+  clear(5);
   return new Map<string, Prefetch>();
 })());
 

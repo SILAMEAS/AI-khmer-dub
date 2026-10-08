@@ -9,8 +9,8 @@ export const fullEdit = (e: Partial<EditOpts> | undefined): EditOpts => ({
 });
 
 export type Voice = "male" | "female";
-export type VoiceChoice = Voice | "auto" | "clone";
-export type Segment = { start: number; end: number; text: string; km: string; f0?: number; voice?: Voice; speaker?: number };
+export type VoiceChoice = Voice | "auto";
+export type Segment = { start: number; end: number; text: string; km: string; f0?: number; voice?: Voice };
 
 /** pitch: semitones; bass / treble: dB; echo: none, a small room or a big hall. */
 export type Tone = { pitch: number; bass: number; treble: number; echo: "none" | "room" | "hall" };
@@ -45,7 +45,7 @@ export type Job = {
     sub?: object; logo?: object; out?: object; fx?: object; mix?: Partial<Mix>; trim?: { from: number; to: number };
     mode?: "dub" | "edit"; edit?: Partial<EditOpts>; autoExport?: boolean;
   };
-  meta?: { title: string; duration: number; language: string; segments: number; speakers?: number; captions?: string };
+  meta?: { title: string; duration: number; language: string; segments: number; captions?: string };
   tracks?: { voice: boolean; vocals: boolean; output: boolean; shapes?: string[]; thumbnail?: boolean };
   task?: { name: "separate"; progress: number; message: string }; // runs in the background, the editor stays usable
   taskError?: string;

@@ -2,7 +2,14 @@
 # Use start.cmd (it runs this script even where PowerShell scripts are blocked).
 # (-LiteralPath everywhere: a folder name with [ ] in it would otherwise be read as a wildcard)
 Set-Location -LiteralPath $PSScriptRoot
-# Options typed after start.cmd (e.g. start.cmd --no-clone) are passed on to setup
+
+# (defined first: a script can only call a function defined above the call)
+function Stop-WithMessage($msg) {
+  Write-Host "`n$msg" -ForegroundColor Red
+  exit 1
+}
+
+# Options typed after start.cmd (e.g. start.cmd --no-separation) are passed on to setup
 $extraArgs = @($args)
 # older Windows 10 / .NET may not offer TLS 1.2 by default, which nodejs.org requires
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -31,16 +38,6 @@ if ($env:HTTPS_PROXY -or $env:HTTP_PROXY) {
   $env:NODE_USE_ENV_PROXY = "1"  # Node.js 22.21+ / 24: its fetch() follows HTTPS_PROXY by itself
 }
 
-function Stop-WithMessage($msg) {
-  Write-Host "`n$msg" -ForegroundColor Red
-  exit 1
-}
-
-function Update-PathFromSystem {
-  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-              [Environment]::GetEnvironmentVariable("Path", "User")
-}
-
 # Everything this app writes stays inside its folder, not on the system drive: npm's download cache,
 # temporary files (npm, the build, the app), and a portable Node.js when the PC has none.
 $env:npm_config_cache = Join-Path $PSScriptRoot ".cache\npm"
@@ -64,6 +61,24 @@ try {
   Start-Process "http://127.0.0.1:5000"
   exit 0
 } catch { }
+
+# A program from the app's own bin\ or py\ folder (yt-dlp, aria2c, ffmpeg, whisper, the Python voice worker)
+# whose parent has ended is left from a session whose window was closed while it worked: Windows does not stop
+# what a closed program started. It would keep downloading and keep its files locked - stop it, with what it
+# started. Only orphans: a program the running app (or another setup window) started still has its parent.
+$own = @("$PSScriptRoot\bin\", "$PSScriptRoot\py\")
+$procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+$pids = New-Object 'System.Collections.Generic.HashSet[int]'
+foreach ($p in $procs) { [void]$pids.Add([int]$p.ProcessId) }
+$procs | Where-Object {
+  $exe = $_.ExecutablePath
+  $exe -and @($own | Where-Object { $exe.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -and
+    -not $exe.StartsWith("$PSScriptRoot\bin\node\", [StringComparison]::OrdinalIgnoreCase) -and  # not Node.js itself
+    -not $pids.Contains([int]$_.ParentProcessId)  # its parent is gone
+} | ForEach-Object {
+  Write-Host "Stopping $($_.Name) left running by the last session"
+  & taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null  # /T: and what it started (yt-dlp's aria2c, ffmpeg)
+}
 
 # The PC's own Node.js is new enough (e.g. updated since): the portable copy is a duplicate
 if ($pcNodeOk -and (Test-Path -LiteralPath $ownNode)) {
@@ -114,16 +129,16 @@ $done = $null
 if (Test-Path -LiteralPath $marker) { try { $done = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json } catch { } }
 if (-not $done -or $done.fingerprint -ne $fingerprint -or $extraArgs.Count) {
   $setupArgs = @()
-  if ($done -and $done.args) { $setupArgs = @($done.args) }  # keep earlier choices such as --no-clone
+  if ($done -and $done.args) { $setupArgs = @($done.args) }  # keep earlier choices such as --no-separation
   $setupArgs = @($setupArgs + $extraArgs | Select-Object -Unique)
-  Write-Host "Setting up (the first time this downloads ~9 GB and takes 15-30 minutes)...`n"
+  Write-Host "Setting up (the first time this downloads ~5 GB and takes 10-20 minutes)...`n"
   npm run setup -- @setupArgs
   if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Setup did not finish - see the message above, then run start.cmd again." }
 }
 
 # 3. Build when the code changed since the last build
 $build = ".next\BUILD_ID"
-$newest = Get-ChildItem -LiteralPath app, lib, proxy.ts, next.config.ts, package.json, tsconfig.json -Recurse -File |
+$newest = Get-ChildItem -LiteralPath app, lib, proxy.ts, instrumentation.ts, next.config.ts, package.json, tsconfig.json -Recurse -File |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not (Test-Path -LiteralPath $build) -or $newest.LastWriteTime -gt (Get-Item -LiteralPath $build).LastWriteTime) {
   npm run build

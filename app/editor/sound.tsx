@@ -223,12 +223,12 @@ function ToneControls({ value: t, onChange, echo = true, live }: { value: Tone; 
 export type StemState = { ready: boolean; task?: { progress: number; message: string }; error?: string; project: boolean };
 
 /** Original sound and your music (left panel of Audio). */
-export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, clone, brand, reload, stems, onRetry }: MixProps & {
-  bgMode: "duck" | "none"; onBgMode: (b: "duck" | "none") => void; canSplit: boolean; clone: boolean;
+export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, brand, reload, stems, onRetry }: MixProps & {
+  bgMode: "duck" | "none"; onBgMode: (b: "duck" | "none") => void; canSplit: boolean;
   brand: Branding | null; reload: () => void; stems: StemState; onRetry: () => void;
 }) {
   const set = (p: Partial<Mix>) => onChange({ ...m, ...p });
-  const keep = bgMode === "duck", split = clone || m.split;
+  const keep = bgMode === "duck", split = m.split;
   const input = useRef<HTMLInputElement>(null);
   const [err, setErr] = useState("");
   const track = brand?.music?.url ?? null;
@@ -257,18 +257,18 @@ export function SoundSources({ value: m, onChange, bgMode, onBgMode, canSplit, c
       <fieldset className="pane-group" disabled={!keep}>
         <label className="f">Original voices (the Chinese / English speech)</label>
         <div className="seg-btns">
-          {!clone && <button type="button" className={!split ? "on" : ""} onClick={() => set({ split: false })}
-            title="Kept in the original sound, lowered while the Khmer speaks">Lower</button>}
-          <button type="button" className={split && !m.voices ? "on" : ""} disabled={!canSplit && !clone}
+          <button type="button" className={!split ? "on" : ""} onClick={() => set({ split: false })}
+            title="Kept in the original sound, lowered while the Khmer speaks">Lower</button>
+          <button type="button" className={split && !m.voices ? "on" : ""} disabled={!canSplit}
             onClick={() => set({ split: true, voices: 0 })}>Remove</button>
-          <button type="button" className={split && m.voices > 0 ? "on" : ""} disabled={!canSplit && !clone}
+          <button type="button" className={split && m.voices > 0 ? "on" : ""} disabled={!canSplit}
             onClick={() => set({ split: true, voices: m.voices || 15 })} title="Quietly under the Khmer, like a documentary">Custom</button>
         </div>
         {split && m.voices > 0 && (
           <label className="slider-row"><span>Voice level</span>
             <input type="range" min={5} max={100} step={5} value={m.voices} onChange={(e) => set({ voices: +e.target.value })} /><b>{m.voices}%</b></label>
         )}
-        {!canSplit && !clone ? <small className="note">Removing them needs the voice tools (npm run setup); until then they can only be lowered.</small>
+        {!canSplit ? <small className="note">Removing them needs the voice separation (close the app and run start.cmd); until then they can only be lowered.</small>
           : split && <StemStatus stems={stems} onRetry={onRetry} />}
         <label className="slider-row"><span>{split ? "Music & effects" : "Original sound"}</span>
           <input type="range" min={0} max={100} step={5} value={m.music} onChange={(e) => set({ music: +e.target.value })} /><b>{m.music}%</b></label>

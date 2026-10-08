@@ -32,7 +32,7 @@ const TABS: [Tab, string, string][] = [
 const DUB_TABS: Tab[] = ["voice", "captions"];
 const STEPS: [string, string][] = [
   ["download", "Download"], ["extract", "Audio"], ["transcribe", "Speech→text"], ["separate", "Voices/music"], ["analyze", "Speakers"],
-  ["translate", "Translate"], ["review", "Review"], ["tts", "Khmer voice"], ["clone", "Clone voices"], ["mix", "Mix"], ["mux", "Video"], ["done", "Done"],
+  ["translate", "Translate"], ["review", "Review"], ["tts", "Khmer voice"], ["mix", "Mix"], ["mux", "Video"], ["done", "Done"],
 ];
 const DOWNLOADS: [string, string, string][] = [
   ["output.mp4", "🎬 Video", "MP4 + subtitle track"],
@@ -42,12 +42,11 @@ const DOWNLOADS: [string, string, string][] = [
   ["dub_audio.m4a", "🔊 Khmer audio", ".m4a"],
 ];
 const CARDS: Record<VoiceChoice, [string, string, string, string]> = {
-  clone: ["clone", "🧬", "Original voices", "Each person keeps their own voice"],
   auto: ["auto", "🎭", "Auto", "Boy or girl, like each speaker"],
   male: ["boy", "👦", "Boy", "Piseth"],
   female: ["girl", "👧", "Girl", "Sreymom"],
 };
-const KM_LABEL: Record<VoiceChoice, string> = { clone: "សំឡេងដើម", auto: "ស្វ័យប្រវត្តិ", male: "ប្រុស", female: "ស្រី" };
+const KM_LABEL: Record<VoiceChoice, string> = { auto: "ស្វ័យប្រវត្តិ", male: "ប្រុស", female: "ស្រី" };
 const PREFS = "khmerDubPrefs", LAYOUT = "khmerDubLayout";
 
 /** Sizes of the resizable parts (pixels): left panel, right panel, timeline. */
@@ -59,17 +58,17 @@ const fitSizes = (s: Sizes): Sizes => ({
   bottom: Math.round(Math.min(Math.max(140, (typeof window === "undefined" ? 900 : window.innerHeight) - 52 - 180), Math.max(110, s.bottom))),
 });
 
-function VoiceCard({ v, on, onPick, rate, off }: { v: VoiceChoice; on: boolean; onPick: () => void; rate: number; off?: string }) {
+function VoiceCard({ v, on, onPick, rate }: { v: VoiceChoice; on: boolean; onPick: () => void; rate: number }) {
   const [cls, icon, name, sub] = CARDS[v];
   return (
-    <div className={`voice ${cls} ${on ? "on" : ""} ${off ? "off" : ""}`} role="radio" aria-checked={on} aria-disabled={!!off}
-      tabIndex={0} title={off} onClick={() => !off && onPick()} onKeyDown={(e) => {
+    <div className={`voice ${cls} ${on ? "on" : ""}`} role="radio" aria-checked={on}
+      tabIndex={0} onClick={onPick} onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault(); e.stopPropagation(); // Space picks the voice; it must not also start the video
-        if (!off) onPick();
+        onPick();
       }}>
       <div className="av">{icon}</div>
-      <div><b>{name}</b> <span className="km">{KM_LABEL[v]}</span><small>{off || sub}</small></div>
+      <div><b>{name}</b> <span className="km">{KM_LABEL[v]}</span><small>{sub}</small></div>
       {(v === "male" || v === "female") && (
         <button type="button" className="btn ghost sm play" onClick={(e) => { e.stopPropagation(); playSample(`/api/voices/preview?voice=${v}&rate=${rate}`); }}>▶</button>
       )}
@@ -196,7 +195,7 @@ export default function Studio() {
   const [job, setJob] = useState<Job | null>(null);
   const [pollKey, setPollKey] = useState(0);
   const [history, setHistory] = useState<Job[]>([]);
-  const [canClone, setCanClone] = useState(false);
+  const [canSplit, setCanSplit] = useState(false); // the original voices can be removed (not only lowered)
 
   // new project: the video to dub (or only to edit), from a file, a link or many at once
   const [mode, setMode] = useState<"file" | "url" | "batch">("file");
@@ -292,7 +291,7 @@ export default function Studio() {
       const p = JSON.parse(localStorage.getItem(PREFS) || "null");
       if (p) { setMix(fullMix(p.mix)); setBgMode(p.bgMode === "none" ? "none" : "duck"); setRate(p.rate ?? 0); setMatch(p.match !== false); }
     } catch {}
-    api<{ clone: boolean }>("/api/capabilities").then((c) => { setCanClone(c.clone); }).catch(() => {});
+    api<{ separate: boolean }>("/api/capabilities").then((c) => { setCanSplit(c.separate); }).catch(() => {});
     loadHistory();
     // a project opened by its link, optionally at a tool and a moment: ?job=<id>&tab=filters&t=30
     const q = new URLSearchParams(location.search), linked = q.get("job");
@@ -366,8 +365,8 @@ export default function Studio() {
       setSegs((local) => {
         if (first || !local || !before || local.length !== saved.length) return saved;
         // a line changed since it was sent keeps your change; the others take what was saved
-        const differs = (a: Segment, b: Segment) => a.km !== b.km || a.voice !== b.voice || a.speaker !== b.speaker;
-        return saved.map((x, i) => (differs(local[i], before[i]) ? { ...x, km: local[i].km, voice: local[i].voice, speaker: local[i].speaker } : x));
+        const differs = (a: Segment, b: Segment) => a.km !== b.km || a.voice !== b.voice;
+        return saved.map((x, i) => (differs(local[i], before[i]) ? { ...x, km: local[i].km, voice: local[i].voice } : x));
       });
     }).catch(() => {});
   }, [jobVersion]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -377,12 +376,11 @@ export default function Studio() {
     const out = new Set<number>();
     segs?.forEach((s, i) => {
       const b = baseSegs?.[i];
-      if (b && (b.km !== s.km || b.voice !== s.voice || b.speaker !== s.speaker)) out.add(i);
+      if (b && (b.km !== s.km || b.voice !== s.voice)) out.add(i);
     });
     return out;
   }, [segs, baseSegs]);
-  const clone = voice === "clone";
-  const stemsWanted = (clone || mix.split) && bgMode === "duck";
+  const stemsWanted = mix.split && bgMode === "duck";
   const voicesChanged = !!job && job.status === "done" && (edited.size > 0 || voice !== job.opts.voice
     || match !== (job.opts.match !== false) || rate !== (job.opts.rate ?? 0));
   // (only worked out again when the settings or the job change, not each time a line is typed in)
@@ -401,10 +399,10 @@ export default function Studio() {
   }, []);
   useEffect(() => {
     // only once the project's own settings are in the editor (not the defaults shown while it loads)
-    if (!job?.meta || !ready || synced !== job.id || !canClone || !stemsWanted || job.tracks?.vocals || job.task
+    if (!job?.meta || !ready || synced !== job.id || !canSplit || !stemsWanted || job.tracks?.vocals || job.task
       || separating.current.has(job.id)) return;
     separateNow(job.id);
-  }, [job?.id, job?.status, job?.task, job?.tracks?.vocals, stemsWanted, canClone, ready, synced, separateNow]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job?.id, job?.status, job?.task, job?.tracks?.vocals, stemsWanted, canSplit, ready, synced, separateNow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------- actions
   const settingsBody = () => ({ voice, match, rate, bgMode, mix, edit, ...look });
@@ -448,7 +446,7 @@ export default function Studio() {
     acting.current = true;
     if (!auto) videoRef.current?.pause(); // made by itself: the video keeps playing
     const body: Record<string, unknown> = settingsBody();
-    if (segs) body.segments = segs.map((s, i) => ({ i, km: s.km, voice: s.voice, speaker: s.speaker }));
+    if (segs) body.segments = segs.map((s, i) => ({ i, km: s.km, voice: s.voice }));
     sentSegs.current = segs;
     try {
       await api(`/api/jobs/${jobId}/dub`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -625,7 +623,6 @@ export default function Studio() {
   useEffect(() => setSelectedCut(null), [edit.cuts]);
 
   // ---------------------------------------------------------------- lines
-  const speakers = clone ? job?.meta?.speakers ?? 0 : 0;
   // (the same functions every time, so the lines in the list and the timeline that didn't change aren't drawn again)
   const setLine = useCallback((i: number, p: Partial<Segment>) => setSegs((ss) => ss && ss.map((x, k) => (k === i ? { ...x, ...p } : x))), []);
   const setLineText = useCallback((i: number, km: string) => setLine(i, { km }), [setLine]);
@@ -660,13 +657,6 @@ export default function Studio() {
         <div className="orig-text">{s.text}</div>
         <label className="f">Khmer</label>
         <textarea className="km" rows={4} value={s.km} onChange={(e) => setLine(i, { km: e.target.value })} />
-        {speakers > 0 && (
-          <label className="f">Who says it
-            <select value={s.speaker ?? 0} onChange={(e) => setLine(i, { speaker: +e.target.value })}>
-              {Array.from({ length: speakers }, (_, k) => <option key={k} value={k}>Person {k + 1}</option>)}
-            </select>
-          </label>
-        )}
         {voice === "auto" && s.voice && (
           <div className="seg-btns">
             {(["male", "female"] as Voice[]).map((g) => (
@@ -762,27 +752,14 @@ export default function Studio() {
       ) : (
         <div className="pane">
           <div className="voices col">
-            {(["clone", "auto", "male", "female"] as const).map((c) => (
-              <VoiceCard key={c} v={c} on={voice === c} onPick={() => setVoice(c)} rate={rate}
-                off={c === "clone" && !canClone ? "Not installed: npm run setup" : undefined} />
+            {(["auto", "male", "female"] as const).map((c) => (
+              <VoiceCard key={c} v={c} on={voice === c} onPick={() => setVoice(c)} rate={rate} />
             ))}
           </div>
           <label className="slider-row"><span>Speaking speed</span>
             <input type="range" min={-30} max={40} step={5} value={rate} onChange={(e) => setRate(+e.target.value)} /><b>{rate > 0 ? "+" : ""}{rate}%</b></label>
           <label className="check"><input type="checkbox" checked={match} onChange={(e) => setMatch(e.target.checked)} />
             <span>Sound like the original speaker<small>Follow each person&apos;s pitch and loudness</small></span></label>
-          {speakers > 0 && segs && (
-            <>
-              <h4>Voices found</h4>
-              <div className="people">
-                {Array.from({ length: speakers }, (_, k) => (
-                  <button key={k} type="button" className={`btn ghost sm spk s${k % 6}`} onClick={() => playSample(`${base}speaker_${k + 1}.wav`)}>
-                    ▶ Person {k + 1} <small>({segs.filter((x) => x.speaker === k).length})</small>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
         </div>
       );
       case "captions": return (
@@ -807,8 +784,8 @@ export default function Studio() {
       );
       case "text": return <TitlePanel {...lookProps} />;
       case "filters": return <FilterGallery {...lookProps} />;
-      case "effects": return <CoverPanel {...lookProps} />;
-      case "audio": return <SoundSources value={mix} onChange={setMix} bgMode={bgMode} onBgMode={setBgMode} canSplit={canClone} clone={clone}
+      case "effects": return <CoverPanel {...lookProps} jobId={job?.meta ? job.id : undefined} />;
+      case "audio": return <SoundSources value={mix} onChange={setMix} bgMode={bgMode} onBgMode={setBgMode} canSplit={canSplit}
         brand={brand} reload={reload} onRetry={() => job && separateNow(job.id)}
         stems={{ project: !!job?.meta, ready: !!job?.tracks?.vocals, task: job?.task, error: job?.taskError }} />;
       case "logo": return <LogoPanel {...lookProps} brand={brand} reload={reload} part="left" />;
@@ -868,7 +845,7 @@ export default function Studio() {
       case "effects": return <ExtrasPanel {...lookProps} />;
       case "audio": return (
         <AtPlayhead playhead={playhead}>{(time) => (
-          <SoundShaping value={mix} onChange={setMix} split={clone || mix.split} now={time} selectedPart={selectedPart} onSelectPart={setSelectedPart} />
+          <SoundShaping value={mix} onChange={setMix} split={mix.split} now={time} selectedPart={selectedPart} onSelectPart={setSelectedPart} />
         )}</AtPlayhead>
       );
       case "logo": return <LogoPanel {...lookProps} brand={brand} reload={reload} part="right" />;
@@ -959,7 +936,8 @@ export default function Studio() {
         <Player src={src} finalSrc={finalSrc} view={view} onView={setView} look={look} onLook={setLook} segs={segs}
           logoUrl={brand?.logo?.url ?? null} videoRef={videoRef} onPlay={audio.start} onTime={onTime} onDuration={onDuration}
           jobId={job?.meta ? job.id : undefined} placeholder={placeholder}
-          edit={edit} onEdit={setEdit} selectedSticker={selectedSticker} onSelectSticker={pickStickerOnPicture} />
+          edit={edit} onEdit={setEdit} selectedSticker={selectedSticker} onSelectSticker={pickStickerOnPicture}
+          editAreas={tab === "effects"} />
       </main>
 
       <aside className="panel right">
@@ -973,7 +951,7 @@ export default function Studio() {
         <Timeline duration={duration || job?.meta?.duration || 0} playhead={playhead} onSeek={seek} segs={segs} edited={edited}
           selected={selected} onSelect={pickLineInTimeline}
           parts={mix.parts} selectedPart={selectedPart} onSelectPart={pickPart}
-          trim={!job && src ? trim : null} onTrim={setTrim} speakers={speakers}
+          trim={!job && src ? trim : null} onTrim={setTrim}
           cuts={edit.cuts} selectedCut={selectedCut} onSelectCut={pickCut} marks={marks}
           stickers={edit.stickers} selectedSticker={selectedSticker} onSelectSticker={pickSticker} />
       </footer>

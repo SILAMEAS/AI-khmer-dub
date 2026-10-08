@@ -83,15 +83,20 @@ export function parseSubStyle(v: unknown): SubStyle {
   };
 }
 
+/** A part of the source picture, in % of its width (x, w) and height (y, h). */
+export type Area = { x: number; y: number; w: number; h: number };
+
 /**
- * Picture effects. cover: hide subtitles already burned into the source (a band from coverY, coverH high,
- * in % of the picture height) with a blur or a solid box; filter: colour look; brightness / contrast /
+ * Picture effects. cover: hide subtitles already burned into the source (a band from coverY, coverH high and
+ * from coverX, coverW wide, in % of the picture) - blurred, a solid box, or filled from the picture around it;
+ * logoAreas: logos already in the source (up to 4), filled from around them or blurred; filter: colour look; brightness / contrast /
  * saturation: -100..100 (0 = unchanged); mirror: flip left-right; fade: from and to black (sound too);
  * progress: a bar along the bottom showing how far the video is; title: text on the picture the whole time
  * (channel name, episode), drawn with the subtitle font.
  */
 export type FxOpts = {
-  cover: boolean; coverY: number; coverH: number; coverMode: "blur" | "box"; coverColor: string;
+  cover: boolean; coverY: number; coverH: number; coverX: number; coverW: number; coverMode: "blur" | "box" | "fill";
+  coverColor: string; logoAreas: Area[]; logoAreaMode: "fill" | "blur";
   filter: "none" | "vivid" | "warm" | "cool" | "cinematic" | "vintage" | "bw";
   brightness: number; contrast: number; saturation: number; sharpen: boolean;
   mirror: boolean; fade: boolean; progress: boolean; progressColor: string;
@@ -99,7 +104,8 @@ export type FxOpts = {
   zoom: ZoomMode; // slow: a gentle Ken Burns zoom in and out; punch: every other line zoomed in a little
 };
 export const DEFAULT_FX: FxOpts = {
-  cover: false, coverY: 78, coverH: 14, coverMode: "blur", coverColor: "#000000",
+  cover: false, coverY: 78, coverH: 14, coverX: 0, coverW: 100, coverMode: "blur", coverColor: "#000000",
+  logoAreas: [], logoAreaMode: "fill",
   filter: "none", brightness: 0, contrast: 0, saturation: 0, sharpen: false,
   mirror: false, fade: false, progress: false, progressColor: "#ff3b5c",
   title: "", titlePos: "tr", titleSize: 14, titleColor: "#ffffff", zoom: "none",
@@ -114,12 +120,23 @@ const FILTERS: Record<FxOpts["filter"], string> = {
   bw: "hue=s=0,eq=contrast=1.1",
 };
 
+function parseArea(v: unknown): Area | null {
+  if (!v || typeof v !== "object") return null;
+  const a = v as Record<string, unknown>;
+  const x = clamp(a.x, 0, 99, 0), y = clamp(a.y, 0, 99, 0);
+  const w = clamp(a.w, 0.5, 100 - x, 10), h = clamp(a.h, 0.5, 100 - y, 10);
+  return { x, y, w, h };
+}
+
 export function parseFx(v: unknown): FxOpts {
   const s = (v && typeof v === "object" ? v : {}) as Partial<Record<keyof FxOpts, unknown>>;
   const d = DEFAULT_FX;
   return {
     cover: s.cover === true, coverY: clamp(s.coverY, 0, 95, d.coverY), coverH: clamp(s.coverH, 2, 50, d.coverH),
-    coverMode: s.coverMode === "box" ? "box" : "blur", coverColor: hex(s.coverColor, d.coverColor),
+    coverX: clamp(s.coverX, 0, 95, d.coverX), coverW: clamp(s.coverW, 5, 100, d.coverW),
+    coverMode: s.coverMode === "box" || s.coverMode === "fill" ? s.coverMode : "blur", coverColor: hex(s.coverColor, d.coverColor),
+    logoAreas: (Array.isArray(s.logoAreas) ? s.logoAreas : []).slice(0, 4).map(parseArea).filter((a): a is Area => !!a),
+    logoAreaMode: s.logoAreaMode === "blur" ? "blur" : "fill",
     filter: typeof s.filter === "string" && s.filter in FILTERS ? (s.filter as FxOpts["filter"]) : "none",
     brightness: clamp(s.brightness, -100, 100, 0), contrast: clamp(s.contrast, -100, 100, 0),
     saturation: clamp(s.saturation, -100, 100, 0), sharpen: s.sharpen === true,
@@ -455,16 +472,29 @@ export function pictureFilter(o: {
   let last = "0:v";
   if (o.shift) { steps.push(`[${last}]setpts=PTS+${o.shift.toFixed(3)}/TB[t]`); last = "t"; }
   const fx = o.fx ?? DEFAULT_FX;
-  if (fx.cover) { // on the source picture, where its own subtitles are
-    const y = (fx.coverY / 100).toFixed(4), h = (Math.min(fx.coverH, 100 - fx.coverY) / 100).toFixed(4);
-    if (fx.coverMode === "blur") {
-      steps.push(`[${last}]split[c0][c1]`, `[c1]crop=iw:ih*${h}:0:ih*${y},boxblur=14:4[cb]`,
-        `[c0][cb]overlay=0:main_h*${y}[cv]`);
+  // On the source picture, before anything moves it: its own subtitles and logos taken away.
+  const hide: { a: Area; mode: "blur" | "box" | "fill" }[] = [
+    ...(fx.cover ? [{ a: { x: fx.coverX, y: fx.coverY, w: fx.coverW, h: fx.coverH }, mode: fx.coverMode }] : []),
+    ...fx.logoAreas.map((a) => ({ a, mode: fx.logoAreaMode })),
+  ];
+  hide.forEach(({ a, mode }, k) => {
+    // in pixels of the source picture; delogo needs a pixel of picture all round the area
+    const x = Math.max(1, Math.round((o.width * a.x) / 100)), y = Math.max(1, Math.round((o.height * a.y) / 100));
+    const w = Math.max(2, Math.min(o.width - 1 - x, Math.round((o.width * a.w) / 100)));
+    const h = Math.max(2, Math.min(o.height - 1 - y, Math.round((o.height * a.h) / 100)));
+    const out = `hd${k}`;
+    if (mode === "box") {
+      steps.push(`[${last}]drawbox=x=${x}:y=${y}:w=${w}:h=${h}:color=${fx.coverColor.replace("#", "0x")}@1:t=fill[${out}]`);
     } else {
-      steps.push(`[${last}]drawbox=x=0:y=ih*${y}:w=iw:h=ih*${h}:color=${fx.coverColor.replace("#", "0x")}@1:t=fill[cv]`);
+      // fill: painted in from the pixels around it (delogo), then softened a little - a wide band otherwise shows
+      // streaks. blur: the text or logo smeared beyond reading.
+      const fill = mode === "fill";
+      steps.push(`[${last}]${fill ? `delogo=x=${x}:y=${y}:w=${w}:h=${h},` : ""}split[${out}a][${out}b]`,
+        `[${out}b]crop=${w}:${h}:${x}:${y},boxblur=${fill ? "6:2" : "14:4"}[${out}c]`,
+        `[${out}a][${out}c]overlay=${x}:${y}[${out}]`);
     }
-    last = "cv";
-  }
+    last = out;
+  });
   const color = [
     fx.mirror ? "hflip" : "",
     FILTERS[fx.filter],

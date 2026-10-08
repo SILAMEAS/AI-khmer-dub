@@ -1,9 +1,9 @@
-import { cloneAvailable } from "@/lib/clone";
+import { separationAvailable } from "@/lib/stems";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** What this install can do, so the page only offers voice cloning when it is set up. */
+/** What this install can do, so the page only offers removing the original voices when it is set up. */
 export function GET() {
-  return Response.json({ clone: cloneAvailable() });
+  return Response.json({ separate: separationAvailable() });
 }

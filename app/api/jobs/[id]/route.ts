@@ -1,6 +1,6 @@
 import { fs, path } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
-import { stemsReady } from "@/lib/clone";
+import { stemsReady } from "@/lib/stems";
 import { downloadActive } from "@/lib/download";
 import { shapeFile, SHAPES } from "@/lib/branding";
 

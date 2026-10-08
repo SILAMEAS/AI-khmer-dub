@@ -13,12 +13,14 @@ const RATIO: Record<Exclude<OutOpts["aspect"], "original">, number> = { "16:9": 
 const SAMPLE = "សួស្តី! នេះជាចំណងជើងខ្មែរ។", SAMPLE_ORIGINAL = "Hello! These are Khmer subtitles.";
 
 export const Player = memo(function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUrl, videoRef, onPlay, onTime, onDuration,
-  jobId, placeholder, edit, onEdit, selectedSticker, onSelectSticker }: {
+  jobId, placeholder, edit, onEdit, selectedSticker, onSelectSticker, editAreas = false }: {
   src: string | null; finalSrc: string | null; view: "edit" | "final"; onView: (v: "edit" | "final") => void;
   look: Look; onLook: (l: Look) => void; segs: Segment[] | null; logoUrl: string | null;
   videoRef: React.RefObject<HTMLVideoElement | null>; onPlay: () => void; onTime: (t: number) => void; onDuration: (d: number) => void;
   jobId?: string; placeholder?: React.ReactNode;
   edit: EditOpts; onEdit: (e: EditOpts) => void; selectedSticker: string | null; onSelectSticker: (id: string | null) => void;
+  /** the band over the old subtitles and the logo boxes can be dragged (while their panel is open) */
+  editAreas?: boolean;
 }) {
   // while playing, the parts cut out are jumped over, as in the exported video
   const cutsRef = useRef(edit.cuts);
@@ -125,6 +127,33 @@ export const Player = memo(function Player({ src, finalSrc, view, onView, look, 
     window.addEventListener("pointerup", up);
   };
 
+  // The band over the old subtitles ("band") or a logo box (its index): moved by dragging it, resized by its corner.
+  // In % of the source picture, like the export.
+  const latestLook = useRef(look);
+  latestLook.current = look;
+  const dragArea = (e: React.PointerEvent, which: number | "band", mode: "move" | "size", pw: number, ph: number) => {
+    if (!editAreas) return;
+    e.preventDefault(); e.stopPropagation();
+    const fx0 = latestLook.current.fx;
+    const a0 = which === "band" ? { x: fx0.coverX, y: fx0.coverY, w: fx0.coverW, h: fx0.coverH } : fx0.logoAreas[which];
+    if (!a0) return;
+    const sx = e.clientX, sy = e.clientY;
+    const lim = (v: number, lo: number, hi: number) => Math.round(Math.max(lo, Math.min(hi, v)) * 10) / 10;
+    const move = (ev: PointerEvent) => {
+      const dx = ((ev.clientX - sx) / pw) * 100, dy = ((ev.clientY - sy) / ph) * 100;
+      const a = mode === "move"
+        ? { ...a0, x: lim(a0.x + dx, 0, 100 - a0.w), y: lim(a0.y + dy, 0, 100 - a0.h) }
+        : { ...a0, w: lim(a0.w + dx, 1, 100 - a0.x), h: lim(a0.h + dy, 1, 100 - a0.y) };
+      const l = latestLook.current;
+      onLook({ ...l, fx: which === "band"
+        ? { ...l.fx, coverX: a.x, coverY: a.y, coverW: a.w, coverH: a.h }
+        : { ...l.fx, logoAreas: l.fx.logoAreas.map((x, i) => (i === which ? a : x)) } });
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   const toggle = () => {
     const v = videoRef.current;
     if (!v) return;
@@ -163,9 +192,22 @@ export const Player = memo(function Player({ src, finalSrc, view, onView, look, 
                 style={{ inset: 0, width: "100%", height: "100%", filter, transform: [flip, zoom !== 1 && `scale(${zoom.toFixed(4)})`].filter(Boolean).join(" ") || undefined }} />
             </div>
             {fx.cover && (
-              <div className={`cover-band ${fx.coverMode}`} style={{ left: px, width: pw, top: py + (ph * fx.coverY) / 100,
-                height: (ph * Math.min(fx.coverH, 100 - fx.coverY)) / 100, ...(fx.coverMode === "box" && { background: fx.coverColor }) }} />
+              <div className={`cover-band ${fx.coverMode} ${editAreas ? "edit" : ""}`}
+                style={{ left: px + (pw * fx.coverX) / 100, width: (pw * Math.min(fx.coverW, 100 - fx.coverX)) / 100,
+                  top: py + (ph * fx.coverY) / 100, height: (ph * Math.min(fx.coverH, 100 - fx.coverY)) / 100,
+                  ...(fx.coverMode === "box" && { background: fx.coverColor }) }}
+                onPointerDown={(e) => dragArea(e, "band", "move", pw, ph)} title={editAreas ? "Drag to move" : undefined}>
+                {editAreas && <span className="area-size" onPointerDown={(e) => dragArea(e, "band", "size", pw, ph)} title="Drag to resize" />}
+              </div>
             )}
+            {fx.logoAreas.map((a, k) => (
+              <div key={k} className={`cover-band ${fx.logoAreaMode} ${editAreas ? "edit" : ""}`}
+                style={{ left: px + (pw * a.x) / 100, width: (pw * a.w) / 100, top: py + (ph * a.y) / 100, height: (ph * a.h) / 100 }}
+                onPointerDown={(e) => dragArea(e, k, "move", pw, ph)} title={editAreas ? "Drag to move" : undefined}>
+                {editAreas && <><b className="area-label">{k + 1}</b>
+                  <span className="area-size" onPointerDown={(e) => dragArea(e, k, "size", pw, ph)} title="Drag to resize" /></>}
+              </div>
+            ))}
             {fx.title && (
               <div className="ov-title" style={{ ...TITLE_POS[fx.titlePos], color: fx.titleColor,
                 fontFamily: `"${s.font}", "Khmer UI", sans-serif`, fontSize: fx.titleSize * unit }}>{fx.title}</div>

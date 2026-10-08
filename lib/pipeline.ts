@@ -23,18 +23,19 @@ import { timeWords } from "./words";
 import { findCaptions } from "./captions";
 import { download, reusableInput } from "./download";
 import { ttsAgent } from "./net";
-import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample, stemsReady } from "./clone";
+import { BACKGROUND, VOCALS, separate, separationAvailable, stemsReady } from "./stems";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
 export type Voice = keyof typeof VOICES;
-/** auto: boy or girl per line; clone: each line in the original speaker's own voice (lib/clone.ts). */
-export type VoiceChoice = Voice | "auto" | "clone";
-export const defaultVoice = (): VoiceChoice => "auto"; // fastest; voice cloning is picked by hand
+/** auto: boy or girl per line, from the original speaker's voice. */
+export type VoiceChoice = Voice | "auto";
+export const defaultVoice = (): VoiceChoice => "auto";
 /** Why a requested voice can't be used, or null when it can. */
 export function voiceError(v: string): string | null {
-  if (v === "clone") return cloneAvailable() ? null : "Voice cloning is not installed - close the app and run start.cmd again (setup installs it)";
-  return Object.hasOwn(VOICES, v) || v === "auto" ? null : "voice must be clone, auto, male or female";
+  return Object.hasOwn(VOICES, v) || v === "auto" ? null : "voice must be auto, male or female";
 }
+/** A project saved when there was a voice-cloning choice: its lines get boy or girl voices instead. */
+export const knownVoice = (v: unknown): VoiceChoice => (v === "male" || v === "female" ? v : "auto");
 // Natural pitch of each Khmer voice (Hz) and how far it moves per Hz of SSML pitch offset,
 // measured from the voices themselves. Used to bring the dub close to the original speaker.
 const VOICE_PITCH: Record<Voice, { f0: number; perHz: number }> = {
@@ -55,12 +56,9 @@ const MAX_SPEEDUP = 1.6; // never speed a Khmer line up more than this
 const GAP = 0.05;        // seconds of silence kept between dubbed lines
 export const PREVIEW_TEXT = "សួស្តី! នេះគឺជាសំឡេងបញ្ចូលភាសាខ្មែរ សម្រាប់ភាពយន្តរបស់អ្នក។";
 
-/**
- * f0/db: the original speaker's pitch (Hz, 0 = unclear) and loudness; voice: boy or girl for the line (editable);
- * speaker: which person says it (0-based, voice cloning only; editable).
- */
+/** f0/db: the original speaker's pitch (Hz, 0 = unclear) and loudness; voice: boy or girl for the line (editable). */
 export type Segment = {
-  start: number; end: number; text: string; km: string; f0?: number; db?: number; voice?: Voice; speaker?: number;
+  start: number; end: number; text: string; km: string; f0?: number; db?: number; voice?: Voice;
 };
 export type Report = (stage: string, frac: number, msg: string) => void;
 export type Opts = {
@@ -128,7 +126,7 @@ export function parseTrim(v: unknown): Trim | undefined {
   return from || to ? { from, to } : undefined;
 }
 export type Meta = {
-  input: string; title: string; duration: number; language: string; segments: number; speakers?: number;
+  input: string; title: string; duration: number; language: string; segments: number;
   captions?: string; // where the lines came from when the video's own subtitles were used instead of Whisper
 };
 
@@ -449,57 +447,24 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
 }
 
 /** A whisper line with the start time of each word, before lines are glued into sentences. */
-type RawLine = { start: number; end: number; text: string; words: { text: string; at: number }[]; speaker?: number };
+type RawLine = { start: number; end: number; text: string; words: { text: string; at: number }[] };
 
 const cleanText = (t: string) => String(t).trim().replace(/^["“”「」『』]+|["“”「」『』]+$/g, "").trim();
 
-/** Whisper often cuts mid-sentence: glue the pieces back (same person only) so translation and voice sound natural. */
+/** Whisper often cuts mid-sentence: glue the pieces back so translation and voice sound natural. */
 function glue(lines: RawLine[]): Segment[] {
   const segs: Segment[] = [];
   for (const l of lines) {
     const prev = segs[segs.length - 1];
-    if (prev && prev.speaker === l.speaker && !/[.?!。？！…]$/.test(prev.text) && l.start - prev.end < 0.6
+    if (prev && !/[.?!。？！…]$/.test(prev.text) && l.start - prev.end < 0.6
         && l.end - prev.start < 15) {
       prev.text += (/[一-鿿]$/.test(prev.text) ? "" : " ") + l.text;
       prev.end = l.end;
     } else {
-      segs.push({ start: l.start, end: l.end, text: l.text, km: "", ...(l.speaker !== undefined && { speaker: l.speaker }) });
+      segs.push({ start: l.start, end: l.end, text: l.text, km: "" });
     }
   }
   return segs;
-}
-
-/** Cuts a whisper line in two between words, as close as possible to `at` (seconds); null if it can't. */
-function splitLine(l: RawLine, at: number): [RawLine, RawLine] | null {
-  let k = -1, best = Infinity;
-  // whisper's word pieces: " word" in spaced languages, single characters in Chinese; broken bytes are unusable
-  if (!l.words.some((w) => w.text.includes("�"))) {
-    l.words.forEach((w, i) => {
-      if (i > 0 && /^(\s|[　-鿿＀-￯])/.test(w.text) && Math.abs(w.at - at) < best) {
-        best = Math.abs(w.at - at);
-        k = i;
-      }
-    });
-  }
-  let left: string, right: string;
-  if (k > 0) {
-    left = l.words.slice(0, k).map((w) => w.text).join("");
-    right = l.words.slice(k).map((w) => w.text).join("");
-  } else { // no usable word timings: cut the text in proportion to time, at a space or punctuation nearby
-    const chars = [...l.text];
-    let i = Math.round((chars.length * (at - l.start)) / Math.max(l.end - l.start, 0.01));
-    for (let d = 0; d <= 4; d++) {
-      if (/[\s，。、,.?!？！]/.test(chars[i + d - 1] ?? "")) { i += d; break; }
-      if (/[\s，。、,.?!？！]/.test(chars[i - d - 1] ?? "")) { i -= d; break; }
-    }
-    left = chars.slice(0, i).join("");
-    right = chars.slice(i).join("");
-  }
-  if (!cleanText(left) || !cleanText(right)) return null;
-  return [
-    { start: l.start, end: at, text: cleanText(left), words: k > 0 ? l.words.slice(0, k) : [] },
-    { start: at, end: l.end, text: cleanText(right), words: k > 0 ? l.words.slice(k) : [] },
-  ];
 }
 
 // ---------------------------------------------------------------- stage 3: translate
@@ -658,24 +623,16 @@ async function prepareSound(jd: string, opts: Opts, report: Report, src: string,
     return picture({ input: path.basename(src), title, duration, language: "", segments: 0 });
   }
 
-  // Voice cloning needs the voices apart from the music first (speech under music is then also recognised
-  // better). The other voices don't wait for it: the editor separates them in the background afterwards.
-  let speechWav = wav;
-  if (opts.voice === "clone") {
-    report("separate", 0, "Separating voices from music");
-    await separate(jd, src, duration, (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
-    speechWav = path.join(jd, "vocals16k.wav");
-    if (!captions) await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, VOCALS), "-ac", "1", "-ar", "16000", speechWav]);
-  }
+  // (removing the original voices from the music doesn't hold this up: the editor does it in the background)
   if (captions) report("transcribe", 1, `Using ${captions.from} (${captions.lines.length} lines)`);
   const { lines, language } = captions
     ? { lines: captions.lines.map((c): RawLine => ({ ...c, words: [] })), language: captions.language }
-    : await transcribe(speechWav, jd, opts.sourceLang, opts.quality, report);
+    : await transcribe(wav, jd, opts.sourceLang, opts.quality, report);
   if (!lines.length) throw new Error("No speech was detected in this video");
   const meta: Meta = {
     input: path.basename(src), title, duration, language, segments: 0, ...(captions && { captions: captions.from }),
   };
-  const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
+  const segs = glue(lines);
   meta.segments = segs.length;
   await analyzeSpeakers(jd, segs, report);
   await translate(segs, language, report);
@@ -715,47 +672,6 @@ async function cut(jd: string, src: string, { from, to }: Trim, report: Report):
   return out;
 }
 
-/**
- * Voice cloning: split voices from music, find who says each line (and where another person cuts in)
- * and keep a voice sample of each person.
- */
-async function speakerPieces(jd: string, lines: { start: number; end: number }[], meta: Meta, report: Report) {
-  report("separate", 0, "Separating voices from music");
-  await separate(jd, path.join(jd, meta.input), meta.duration,
-    (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));
-  report("analyze", 0, "Finding who speaks each line");
-  const pieces = await findSpeakers(jd, lines, (f) => report("analyze", f, "Finding who speaks each line"));
-  meta.speakers = new Set(pieces.map((p) => p.speaker)).size;
-  return pieces;
-}
-
-/** Whisper lines cut wherever another person starts talking, each with its speaker. */
-async function splitBySpeaker(jd: string, lines: RawLine[], meta: Meta, report: Report): Promise<RawLine[]> {
-  const pieces = await speakerPieces(jd, lines, meta, report);
-  const out: RawLine[] = [];
-  lines.forEach((l, n) => {
-    const mine = pieces.filter((p) => p.line === n).sort((a, b) => a.start - b.start);
-    let rest = l, speaker = mine[0]?.speaker ?? 0;
-    for (const p of mine.slice(1)) {
-      const cut = splitLine(rest, p.start);
-      if (!cut) continue; // nothing to cut between: the line stays with the first person
-      out.push({ ...cut[0], speaker });
-      [rest, speaker] = [cut[1], p.speaker];
-    }
-    out.push({ ...rest, speaker });
-  });
-  return out;
-}
-
-/** Switching an already transcribed job to cloning: each line goes to the person who says most of it. */
-async function assignSpeakers(jd: string, segs: Segment[], meta: Meta, report: Report) {
-  const pieces = await speakerPieces(jd, segs, meta, report);
-  segs.forEach((s, n) => {
-    const mine = pieces.filter((p) => p.line === n);
-    s.speaker = mine.sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]?.speaker ?? 0;
-  });
-}
-
 // ---------------------------------------------------------------- stage 4: Khmer voice
 
 const signed = (n: number, unit: string) => `${n >= 0 ? "+" : ""}${n}${unit}`;
@@ -793,9 +709,8 @@ function pitchOffset(voice: Voice, speakerF0: number): number {
   return Math.round((target - f0) / perHz);
 }
 
-// cloning starts from the boy or girl voice closest to the speaker; the cloned voice then sets the real pitch
-const lineVoice = (s: Segment, choice: VoiceChoice): Voice =>
-  choice === "auto" || choice === "clone" ? s.voice ?? "female" : choice;
+// auto: the boy or girl voice closest to the speaker, found for each line
+const lineVoice = (s: Segment, choice: VoiceChoice): Voice => (choice === "auto" ? s.voice ?? "female" : choice);
 
 /**
  * Khmer voice for every line. A line made before with the same text, voice, speed and pitch is kept
@@ -807,13 +722,13 @@ async function ttsAll(segs: Segment[], opts: Opts, duration: number, dir: string
     const voice = lineVoice(s, opts.voice);
     // time until the next line starts: a dub that runs longer gets sped up
     const slot = Math.max((i + 1 < segs.length ? segs[i + 1].start : duration) - s.start - GAP, 0.3);
-    const pitch = opts.match === false || opts.voice === "clone" ? 0 : pitchOffset(voice, s.f0 ?? 0);
+    const pitch = opts.match === false ? 0 : pitchOffset(voice, s.f0 ?? 0);
     const text = s.km.trim();
     return { i, text, voice, slot, pitch, key: JSON.stringify([text, voice, opts.rate, pitch, Math.round(slot * 20)]) };
   });
   const keyFile = (i: number) => path.join(dir, `${i}.key`);
   for (const x of all) { // a line emptied since: nothing may be left of its old voice
-    if (!x.text) for (const f of [`${x.i}.mp3`, `${x.i}.vc.wav`, `${x.i}.key`, `${x.i}.vckey`]) await fsp.rm(path.join(dir, f), { force: true });
+    if (!x.text) for (const f of [`${x.i}.mp3`, `${x.i}.key`]) await fsp.rm(path.join(dir, f), { force: true });
   }
   const items = all.filter((x) => x.text && !(fs.existsSync(path.join(dir, `${x.i}.mp3`))
     && fs.existsSync(keyFile(x.i)) && fs.readFileSync(keyFile(x.i), "utf8") === x.key));
@@ -841,7 +756,7 @@ async function ttsAll(segs: Segment[], opts: Opts, duration: number, dir: string
       const { i, text, voice, slot, pitch, key } = items[next++];
       const file = path.join(dir, `${i}.mp3`);
       // the old voice of this line goes first: it no longer matches the text
-      for (const f of [keyFile(i), file, path.join(dir, `${i}.vc.wav`), path.join(dir, `${i}.vckey`)]) await fsp.rm(f, { force: true });
+      for (const f of [keyFile(i), file]) await fsp.rm(f, { force: true });
       let mp3 = await say(voice, text, opts.rate, pitch);
       if (mp3) {
         await fsp.writeFile(file, mp3);
@@ -904,7 +819,7 @@ type Made = { src: string; n: number; key?: string; len?: number };
  * disk as 16-bit sound, so an export decodes only the lines that changed - a 2-hour film otherwise ran thousands of
  * ffmpeg on every export. That costs ~300 MB per hour of speech (half of the f32 they used to be), removed with the job.
  */
-async function placeClips(segs: Segment[], dir: string, duration: number, match: boolean, clone: boolean,
+async function placeClips(segs: Segment[], dir: string, duration: number, match: boolean,
                           report: Report): Promise<Clip[]> {
   const clips: Clip[] = [];
   let cursor = 0;
@@ -917,10 +832,7 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
 
   // A changed line is decoded (one ffmpeg per line, many in parallel) and kept on disk, not in memory: a 4-hour film
   // has thousands of lines, hours of sound. Only the lengths stay in memory to place the lines.
-  const files = segs.map((_, i) => {
-    const cloned = path.join(dir, `${i}.vc.wav`);
-    return clone && fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
-  });
+  const files = segs.map((_, i) => path.join(dir, `${i}.mp3`));
   const book = path.join(dir, "clips.json");
   let made: Record<number, Made> = {};
   try { made = JSON.parse(await fsp.readFile(book, "utf8")); } catch { /* none yet (or unreadable): every line is made */ }
@@ -1191,10 +1103,10 @@ const PART_RAMP = 0.15; // seconds to move to and from a part's levels
 async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], duration: number, opts: Opts, report: Report) {
   const { bgMode } = opts, m = parseMix(opts.mix);
   const n = Math.ceil(duration * SR);
-  // voices and music as separate tracks (voice cloning, or asked for): the voices get their own level and sound,
+  // voices and music as separate tracks (when asked for): the voices get their own level and sound,
   // and the music only dips a little under the dub
   const bg = path.join(jd, BACKGROUND), vocals = path.join(jd, VOCALS);
-  const stems = (opts.voice === "clone" || m.split) && stemsReady(jd, duration);
+  const stems = m.split && stemsReady(jd, duration);
   const high = m.music / 100;
   const low = m.duck >= 0 ? m.duck / 100 : ((stems ? 0.5 : 0.12) * high) / 0.8; // automatic: follows the music level
   const music = m.bgm > 0 ? musicFile() : null;
@@ -1533,32 +1445,10 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): P
     await analyzeSpeakers(jd, segs, report);
     saveSegments(jd, segs);
   }
-  if (opts.voice === "clone" && (segs.some((s) => s.speaker === undefined) || !fs.existsSync(speakerSample(jd, 0)))) {
-    await assignSpeakers(jd, segs, meta, report); // switched to cloning after the transcription
-    saveSegments(jd, segs);
-  }
   const ttsDir = path.join(jd, "tts");
   const failed = await ttsAll(segs, opts, meta.duration, ttsDir, report);
-  if (opts.voice === "clone") {
-    // a line already spoken in the same person's voice from the same Khmer line is kept
-    const vcKey = (i: number, ref: string) => {
-      const k = path.join(ttsDir, `${i}.key`);
-      return JSON.stringify([fs.existsSync(k) ? fs.readFileSync(k, "utf8") : "", ref, fs.existsSync(ref) ? fs.statSync(ref).mtimeMs : 0]);
-    };
-    const items = segs.map((s, i) => {
-      const ref = speakerSample(jd, s.speaker ?? 0);
-      return { i, src: path.join(ttsDir, `${i}.mp3`), ref, out: path.join(ttsDir, `${i}.vc.wav`), key: vcKey(i, ref) };
-    }).filter((x) => fs.existsSync(x.src) && fs.existsSync(x.ref)).filter((x) => {
-      const kf = path.join(ttsDir, `${x.i}.vckey`);
-      return !(fs.existsSync(x.out) && fs.existsSync(kf) && fs.readFileSync(kf, "utf8") === x.key);
-    });
-    report("clone", 0, `Speaking in the original voices 0/${items.length}`);
-    await convertVoices(jd, items.map(({ src, ref, out }) => ({ src, ref, out })), (f) =>
-      report("clone", f, `Speaking in the original voices ${Math.round(f * items.length)}/${items.length}`));
-    for (const x of items) if (fs.existsSync(x.out)) fs.writeFileSync(path.join(ttsDir, `${x.i}.vckey`), x.key, "utf8");
-  }
-  // only voice cloning needed the voices apart from the music; for the others it is done in the background
-  await layers(jd, segs, opts, meta, report, opts.voice === "clone");
+  // the voices apart from the music are made in the background (the editor asks for them), not here
+  await layers(jd, segs, opts, meta, report, false);
   if (failed.length) {
     return `No Khmer voice for line${failed.length > 1 ? "s" : ""} ${failed.map((i) => i + 1).join(", ")} `
       + "(no internet, or nothing to say in it) - edit it or try Update voices again";
@@ -1572,7 +1462,7 @@ export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): P
 async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, report: Report, stems = true): Promise<Clip[]> {
   const src = path.join(jd, meta.input);
   if (stems && wantsStems(opts)) await separateVoices(jd, meta, report); // done once per video, then kept
-  const clips = await placeClips(segs, path.join(jd, "tts"), meta.duration, opts.match !== false, opts.voice === "clone", report);
+  const clips = await placeClips(segs, path.join(jd, "tts"), meta.duration, opts.match !== false, report);
   await writeVoiceTrack(jd, clips, meta.duration); // the clips stay for the next export (placeClips)
   writeSubs(jd, timedSubs(segs, clips, meta.duration));
   return clips;
@@ -1582,11 +1472,11 @@ async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, repor
  * Whether the original voices are to be handled apart from the music (removed or at their own level). Without the
  * voice tools they can't be separated: the original sound is then only lowered under the Khmer.
  */
-const wantsStems = (opts: Opts) => parseMix(opts.mix).split && opts.bgMode === "duck" && cloneAvailable();
+const wantsStems = (opts: Opts) => parseMix(opts.mix).split && opts.bgMode === "duck" && separationAvailable();
 
 /** Splits the original sound into voices and music & effects (vocals.wav, background.wav); kept once made. */
 export async function separateVoices(jd: string, meta: Meta, report: Report) {
-  if (!cloneAvailable()) throw new Error("Separating voices from music needs the voice tools - run: npm run setup");
+  if (!separationAvailable()) throw new Error("Separating voices from music is not installed - close the app and run start.cmd again (setup installs it)");
   if (!(await hasAudio(path.join(jd, meta.input)))) throw new Error("This video has no sound track - there are no voices to separate");
   report("separate", 0, "Separating voices from music");
   await separate(jd, path.join(jd, meta.input), meta.duration,

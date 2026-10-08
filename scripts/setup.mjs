@@ -1,10 +1,10 @@
 // Installs everything the app needs, in one go. Safe to run again: finished steps are skipped.
 //
-//   npm run setup                  everything, incl. voice cloning ("original voices")
-//   npm run setup -- --no-clone    skip voice cloning (saves ~5 GB and the Python install)
-//   npm run setup -- --all         also the medium + small Whisper models
-//   npm run setup -- --no-build    don't build the app at the end
-//   npm run setup -- --clean       reinstall programs and packages from scratch (keeps the downloaded models)
+//   npm run setup                       everything, incl. removing the original voices from the music
+//   npm run setup -- --no-separation    without it (no Python, ~3 GB less): the original voices can only be lowered
+//   npm run setup -- --all              also the medium + small Whisper models
+//   npm run setup -- --no-build         don't build the app at the end
+//   npm run setup -- --clean            reinstall programs and packages from scratch (keeps the downloaded models)
 //
 // It also repairs itself: a program that no longer starts is downloaded again, a broken Node or Python
 // install is rebuilt, and leftovers of interrupted runs and files the app does not use are removed.
@@ -22,7 +22,8 @@ const root = path.resolve(import.meta.dirname, "..");
 const bin = path.join(root, "bin");
 const models = path.join(root, "models");
 const args = process.argv.slice(2);
-const wantClone = !args.includes("--no-clone");
+// (--no-clone: its old name, still in .setup-done.json of installs from when the app also cloned voices)
+const wantSeparation = !args.includes("--no-separation") && !args.includes("--no-clone");
 // Without the PC's own Python, pip and model-folder settings (for every program setup runs): Anaconda's
 // PYTHONPATH would mix other versions of the packages in (PYTHONHOME even stops the venv from starting), a
 // PIP_TARGET / PIP_USER / PIP_PREFIX would install outside py/venv, and HF_HUB_CACHE & co. would put the
@@ -33,12 +34,12 @@ for (const k of Object.keys(process.env)) {
   }
 }
 process.env.PYTHONNOUSERSITE = "1";
-const known = ["--no-clone", "--all", "--no-build", "--clean"];
+const known = ["--no-separation", "--no-clone", "--all", "--no-build", "--clean"];
 for (const a of args) if (!known.includes(a)) console.warn(`  ! Unknown option ${a} (known: ${known.join(" ")})`);
 const win = process.platform === "win32";
 
 let stepNo = 0;
-const TOTAL = wantClone ? 8 : 6;
+const TOTAL = wantSeparation ? 8 : 6;
 const step = (title) => console.log(`\n[${++stepNo}/${TOTAL}] ${title}`);
 const ok = (msg) => console.log(`  ✓ ${msg}`);
 const fail = (msg) => { console.error(`\n✗ ${msg}`); process.exit(1); };
@@ -164,7 +165,7 @@ ok(`Node.js ${process.version}`);
 try {
   const s = fs.statfsSync(root);
   const freeGb = (s.bavail * s.bsize) / 1e9;
-  const needGb = wantClone ? 9 : 3;
+  const needGb = wantSeparation ? 6 : 3;
   const drive = path.parse(root).root;
   if (freeGb < needGb) console.warn(`  ! Only ${freeGb.toFixed(1)} GB free on ${drive} - about ${needGb} GB is needed`);
   else ok(`${freeGb.toFixed(0)} GB free on ${drive} (everything is installed inside ${root})`);
@@ -173,7 +174,7 @@ try {
 // --clean: programs and packages from scratch; the big model downloads (models/) are kept
 if (args.includes("--clean")) {
   console.log("  --clean: removing installed programs and packages (models are kept)");
-  for (const d of ["node_modules", ".next", "bin/whisper", "py/venv", "py/src", "py/cache"]) {
+  for (const d of ["node_modules", ".next", "bin/whisper", "py/venv", "py/cache"]) {
     fs.rmSync(path.join(root, d), { recursive: true, force: true });
   }
   for (const n of ["ffmpeg", "ffprobe", "yt-dlp", "deno", "aria2c"]) fs.rmSync(path.join(bin, n + (win ? ".exe" : "")), { force: true });
@@ -388,10 +389,10 @@ for (const m of args.includes("--all") ? Object.values(MODELS) : [MODELS.best]) 
   await download(`${HF}/${m}`, path.join(models, m), m);
 }
 
-// ---------------------------------------------------------------- 5-6. voice cloning
+// ---------------------------------------------------------------- 5-6. removing the original voices (Python)
 
-if (wantClone) {
-  step("Python for voice cloning");
+if (wantSeparation) {
+  step("Python for removing the original voices from the music");
   const py = path.join(root, "py");
   const tmp = path.join(py, "tmp"); // big temp files go here, not on the system drive
   fs.mkdirSync(tmp, { recursive: true });
@@ -474,21 +475,21 @@ if (wantClone) {
     ok(`Python: ${base}`);
     sh(base, ["-m", "venv", path.join(py, "venv")]);
   }
-  // Voice cloning is optional: when a part of it cannot be installed, the app still starts (with the AI
-  // voices), and setup tries again next time.
-  let cloneBroken = false;
-  const cloneFailed = (e) => {
-    cloneBroken = true; incomplete = true;
+  // Removing the original voices is optional: when a part of it cannot be installed, the app still starts (the
+  // original voices can then only be lowered), and setup tries again next time.
+  let sepBroken = false;
+  const sepFailed = (e) => {
+    sepBroken = true; incomplete = true;
     console.warn(`
-  ! Voice cloning could not be installed: ${e.message ?? e}`);
-    console.warn("    The app works without it (AI voices). Setup tries again the next time start.cmd runs.");
+  ! Removing the original voices could not be installed: ${e.message ?? e}`);
+    console.warn("    The app works without it (they are lowered instead). Setup tries again the next time start.cmd runs.");
   };
   try {
     if (!fs.existsSync(venvPy)) await makeVenv();
     ok("Python environment in ./py/venv");
-  } catch (e) { cloneFailed(e); }
+  } catch (e) { sepFailed(e); }
 
-  step("Voice cloning packages and models (~5 GB, takes a while the first time)");
+  step("Voice separation packages and models (~2 GB, takes a while the first time)");
   const pip = (...a) => sh(venvPy, ["-m", "pip", "install", "--quiet", ...a]);
   // An interrupted pip leaves half-removed packages behind as "~name" folders ("Ignoring invalid distribution")
   const sitePackages = win ? path.join(py, "venv", "Lib", "site-packages") : null;
@@ -512,26 +513,52 @@ if (wantClone) {
       }
     }
   }
-  // versions this app was tested with
+  // versions this app was tested with (scripts/separate.py uses these; demucs brings what it needs itself)
   const PACKAGES = [
     ["PyTorch (CPU)", "torch==2.14.1", "torchaudio==2.11.0", "--index-url", "https://download.pytorch.org/whl/cpu"],
-    ["Voice separation and cloning packages", "numpy==2.5.3", "scipy==1.18.1", "librosa==1.0.0", "soundfile==0.14.0",
-      "munch==4.0.0", "einops==0.8.2", "transformers==4.57.6", "huggingface_hub==0.36.2", "pyyaml==6.0.3",
-      "matplotlib==3.11.2", "demucs==4.1.0", "openvino==2026.4.1"], // openvino: voice separation on Intel graphics and CPUs
+    ["Voice separation packages", "numpy==2.5.3", "soundfile==0.14.0", "demucs==4.1.0", "huggingface_hub==0.36.2",
+      "einops==0.8.2", "pyyaml==6.0.3", "openvino==2026.4.1"], // openvino: separation on Intel graphics and CPUs
   ];
   // installed is not enough: they have to load (a missing DLL or a mix of versions shows up only here)
   const packagesLoad = () => tryRun(venvPy, ["-c",
-    "import torch, torchaudio, numpy, scipy, librosa, soundfile, transformers, demucs, openvino; print('ok')"]) === "ok";
+    "import torch, torchaudio, numpy, soundfile, demucs.pretrained, openvino; print('ok')"]) === "ok";
+  // Everything else in the environment is left from older versions of the app (voice cloning brought
+  // transformers, librosa, matplotlib, ... ~1 GB): what the packages above need is followed through their
+  // requirements, the rest is uninstalled.
+  function removeUnusedPackages() {
+    const roots = PACKAGES.flatMap(([, ...p]) => p.filter((x) => !x.startsWith("-") && !x.startsWith("http")).map((x) => x.split("==")[0]));
+    const walk = [
+      "import importlib.metadata as md, json, sys",
+      "from pip._vendor.packaging.requirements import Requirement",
+      "from pip._vendor.packaging.utils import canonicalize_name as c",
+      "dists = {c(d.metadata['Name']): d for d in md.distributions() if d.metadata['Name']}",
+      "need, todo = set(), [c(r) for r in json.loads(sys.argv[1])] + ['pip', 'setuptools', 'wheel']",
+      "while todo:",
+      "    n = todo.pop()",
+      "    if n in need or n not in dists: continue",
+      "    need.add(n)",
+      "    for r in dists[n].requires or []:",
+      "        q = Requirement(r)",
+      "        if q.marker is None or q.marker.evaluate({'extra': ''}): todo.append(c(q.name))",
+      "print(json.dumps(sorted(set(dists) - need)))",
+    ].join("\n");
+    const out = tryRun(venvPy, ["-c", walk, JSON.stringify(roots)]);
+    const extra = out ? JSON.parse(out) : [];
+    if (!extra.length) return;
+    console.log(`  Removing ${extra.length} Python packages the app no longer uses (${extra.slice(0, 6).join(", ")}${extra.length > 6 ? ", ..." : ""})`);
+    sh(venvPy, ["-m", "pip", "uninstall", "-y", "--quiet", ...extra]);
+  }
   // the package list installed last time: the same list, still loading, needs no pip (fast, and works offline)
   const installedMark = path.join(py, "venv", ".packages.json"), wanted = JSON.stringify(PACKAGES);
   function installPackages() {
     removeBrokenPackages();
     try { pip("--upgrade", "pip"); } catch { console.log("  (pip could not update itself - carrying on with this one)"); }
     for (const [label, ...pkgs] of PACKAGES) { console.log(`  ${label}...`); pip(...pkgs); }
+    removeUnusedPackages();
     if (!packagesLoad()) throw new Error("the Python packages are installed but do not load");
     fs.writeFileSync(installedMark, wanted);
   }
-  if (cloneBroken) { /* no Python environment */ }
+  if (sepBroken) { /* no Python environment */ }
   else if (fs.existsSync(installedMark) && fs.readFileSync(installedMark, "utf8") === wanted && packagesLoad()) {
     ok("Python packages already installed");
   } else {
@@ -542,33 +569,19 @@ if (wantClone) {
       if (!online) {
         // never take a working environment apart because the internet is down
         if (packagesLoad()) { console.warn("  ! No internet: the Python packages could not be updated - using the installed ones"); incomplete = true; }
-        else cloneFailed(new Error("no connection to pypi.org to download the Python packages (nothing was removed)"));
+        else sepFailed(new Error("no connection to pypi.org to download the Python packages (nothing was removed)"));
       } else {
         // a damaged environment (an interrupted install, packages of different versions): build it again, once
         console.log(`\n  The Python packages are broken (${e.message}) - rebuilding the Python environment from scratch`);
         fs.rmSync(path.join(py, "venv"), { recursive: true, force: true });
-        try { await makeVenv(); installPackages(); } catch (e2) { cloneFailed(e2); }
+        try { await makeVenv(); installPackages(); } catch (e2) { sepFailed(e2); }
       }
     }
-    if (!cloneBroken) ok("Python packages");
+    if (!sepBroken) ok("Python packages");
   }
-  if (!cloneBroken) try {
-
-    // Seed-VC (zero-shot voice conversion) source, pinned to the tested commit; a zip, so git is not needed
-    const SEED_VC_COMMIT = "51383efd921027683c89e5348211d93ff12ac2a8";
-    const seedVc = path.join(py, "src", "seed-vc");
-    if (!fs.existsSync(path.join(seedVc, "inference.py"))) {
-      const zip = path.join(tmp, "seed-vc.zip");
-      await download(`https://codeload.github.com/Plachtaa/seed-vc/zip/${SEED_VC_COMMIT}`, zip, "Seed-VC download");
-      const out = path.join(py, "src");
-      fs.rmSync(seedVc, { recursive: true, force: true });
-      unzip(zip, out);
-      fs.renameSync(path.join(out, `seed-vc-${SEED_VC_COMMIT}`), seedVc);
-      fs.unlinkSync(zip);
-    }
-    ok("Seed-VC source");
-    console.log("  Voice models (MDX-Net Kim Vocal 2, Demucs, Seed-VC, Whisper-small, BigVGAN)...");
-    sh(venvPy, [path.join(root, "scripts", "voice_clone.py"), "download", "-", "-"]);
+  if (!sepBroken) try {
+    console.log("  Separation models (MDX-Net Kim Vocal 2, Demucs)...");
+    sh(venvPy, [path.join(root, "scripts", "separate.py"), "download", "-", "-"]);
     // pip's copies of the downloaded packages (~0.4 GB) are not needed once they are installed
     fs.rmSync(path.join(py, "cache"), { recursive: true, force: true });
     // OpenVINO's compiled copy of the separation model (~1.6 GB, makes loading 7 s -> 0.4 s) is made for one
@@ -588,14 +601,14 @@ if (wantClone) {
       }
       fs.writeFileSync(ovMark, ovVersion);
     }
-    ok("voice cloning ready");
-  } catch (e) { cloneFailed(e); }
+    ok("removing the original voices ready");
+  } catch (e) { sepFailed(e); }
 }
 
 // ---------------------------------------------------------------- 7. duplicates and unused files
 
 // Only what the app uses is kept: older versions of a model, second copies, programs and packages nothing
-// uses any more are removed. (lib/pipeline.ts, lib/tools.ts and scripts/voice_clone.py name what is used.)
+// uses any more are removed. (lib/pipeline.ts, lib/tools.ts and scripts/separate.py name what is used.)
 step("Removing duplicates and files the app does not use");
 let freed = 0;
 const sizeOf = (p) => {
@@ -627,13 +640,18 @@ if (!appRunning) {
 // speech models: the three sizes the app offers and the VAD model; any other ggml file is another version
 keepOnly(models, [...Object.values(MODELS), "ggml-silero-v5.1.2.bin", "hf", "mdx", "torch"], "not used by the app");
 keepOnly(path.join(models, "mdx"), ["Kim_Vocal_2.onnx", "cache"], "not used by the app");
-keepOnly(path.join(root, "py"), ["python", "venv", "src", "tmp", "cache"], "not used by the app");
-keepOnly(path.join(root, "py", "src"), ["seed-vc"], "not used by the app");
+keepOnly(path.join(root, "py"), ["python", "venv", "tmp", "cache"], "not used by the app"); // (src/: voice cloning's code)
 
 // voice models (Hugging Face cache): when a model is updated, the old version stays next to the new one
 // (not while the app runs: it may be downloading a model into there right now)
 const hub = path.join(models, "hf", "hub");
 if (fs.existsSync(hub) && !appRunning) {
+  // only Demucs (scripts/separate.py) comes from here; the rest is voice cloning's (Seed-VC, BigVGAN, Whisper-small)
+  const HUB_MODELS = ["models--adefossez--HTDemucs"];
+  for (const repo of fs.readdirSync(hub).filter((d) => d.startsWith("models--") && !HUB_MODELS.includes(d))) {
+    remove(path.join(hub, repo), "model not used by the app any more");
+    fs.rmSync(path.join(hub, ".locks", repo), { recursive: true, force: true });
+  }
   for (const repo of fs.readdirSync(hub).filter((d) => d.startsWith("models--"))) {
     const dir = path.join(hub, repo), refs = path.join(dir, "refs"), snaps = path.join(dir, "snapshots");
     if (!fs.existsSync(refs) || !fs.existsSync(snaps)) continue;
@@ -678,7 +696,7 @@ else {
 // (line endings ignored: git may check the same file out with CRLF or LF; and a byte-order mark, which
 // start.ps1's reading drops - an editor may save one)
 const fingerprint = ["scripts/setup.mjs", "package-lock.json"].map((f) => createHash("sha256")
-  .update(fs.readFileSync(path.join(root, f), "utf8").replace(/^﻿/, "").replace(/\r/g, ""), "utf8")
+  .update(fs.readFileSync(path.join(root, f), "utf8").replace(/^\uFEFF/, "").replace(/\r/g, ""), "utf8")
   .digest("hex").toUpperCase()).join("");
 // something could not be updated (no internet) but works: not marked done, so the next start tries again
 if (!incomplete) {
@@ -689,4 +707,4 @@ if (!incomplete) {
 console.log(`
 Setup complete${incomplete ? " (some parts could not be updated - setup tries again next time)" : ""}.
   Start the app:  start.cmd   ->  http://127.0.0.1:5000
-${wantClone ? "" : "  Voice cloning was skipped; add it later with: npm run setup\n"}`);
+${wantSeparation ? "" : "  Removing the original voices was left out (--no-separation); add it later with: npm run setup\n"}`);
