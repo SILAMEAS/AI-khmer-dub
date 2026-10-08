@@ -4,7 +4,7 @@
  * Sound: the panels that set the mix, and the live preview engine that plays it in the browser while you change it
  * (Web Audio: the same levels, dips, parts, bass / treble and echo as the final mix; only pitch waits for Apply).
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clock, parseTime, type Mix, type Part, type Segment, type Tone } from "./common";
 import type { Branding } from "./look";
 
@@ -12,7 +12,8 @@ import type { Branding } from "./look";
 
 type Urls = { voice?: string; vocals?: string; background?: string; bgm?: string };
 type EngineIn = {
-  video: HTMLVideoElement | null; urls: Urls; mix: Mix; bgMode: "duck" | "none"; stems: boolean;
+  /** a ref, not the element: the player makes a new one when its source changes, and the editor isn't drawn again then */
+  video: React.RefObject<HTMLVideoElement | null>; urls: Urls; mix: Mix; bgMode: "duck" | "none"; stems: boolean;
   segs: Segment[] | null; enabled: boolean;
 };
 
@@ -117,8 +118,8 @@ export function useLiveAudio(p: EngineIn) {
     }
   }, [urlKey, live]);
 
-  function start() {
-    const v = latest.current.video;
+  const start = useCallback(() => {
+    const v = latest.current.video.current;
     if (!v) return;
     if (!ctx.current) ctx.current = new AudioContext();
     const c = ctx.current;
@@ -130,15 +131,16 @@ export function useLiveAudio(p: EngineIn) {
     }
     c.resume();
     setLive(true);
-  }
+  }, []);
 
-  // every frame: levels from the current settings at the video's time, other tracks kept in step
+  // every frame while playing: levels from the current settings at the video's time, other tracks kept in step.
+  // Paused, the loop stops (after one last pass that pauses the other tracks) and the video's next play starts it again.
   useEffect(() => {
     if (!live) return;
     let raf = 0;
     const tick = () => {
-      raf = requestAnimationFrame(tick);
-      const { video: v, mix: m, bgMode, stems, segs, enabled } = latest.current;
+      raf = 0;
+      const { video: { current: v }, mix: m, bgMode, stems, enabled } = latest.current;
       const c = ctx.current;
       if (!v || !c) return;
       const t = v.currentTime, now = c.currentTime;
@@ -171,9 +173,13 @@ export function useLiveAudio(p: EngineIn) {
         if (Math.abs(el.currentTime - want) > 0.25) el.currentTime = want;
         if (el.paused) el.play().catch(() => {});
       }
+      if (!v.paused) raf = requestAnimationFrame(tick);
     };
+    // "play" doesn't bubble, so it is caught on the way down; the other tracks' own play events are not the video's
+    const wake = (e: Event) => { if (!raf && e.target === latest.current.video.current) tick(); };
+    document.addEventListener("play", wake, true);
     tick();
-    return () => cancelAnimationFrame(raf);
+    return () => { cancelAnimationFrame(raf); document.removeEventListener("play", wake, true); };
   }, [live]);
 
   const iv = useRef<[number, number][]>([]);

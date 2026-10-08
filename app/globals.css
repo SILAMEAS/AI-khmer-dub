@@ -234,6 +234,9 @@ body:has(.studio) { overflow: hidden; background: #0d0d10; }
 
 .findbar { display: grid; gap: 6px; }
 .cap-list { overflow-y: auto; display: grid; gap: 4px; align-content: start; min-height: 0; }
+/* only the lines near the view are drawn, each placed where it would be in the whole list */
+.cap-win { position: relative; }
+.cap-win > .cap { position: absolute; left: 0; right: 0; }
 .cap { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 6px; padding: 6px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; }
 .cap:hover { background: var(--raised); }
 .cap.on { border-color: var(--accent); background: var(--accent-soft); }

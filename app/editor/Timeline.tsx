@@ -5,16 +5,48 @@
  * One scroll area (so the horizontal scrollbar is always at the bottom); the ruler stays on top and the track
  * names on the left while scrolling. Ctrl + mouse wheel zooms around the pointer.
  */
-import { useEffect, useRef, useState } from "react";
-import { clock, type Part, type Range, type Segment, type Sticker } from "./common";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { clock, usePlayhead, type Part, type Playhead, type Range, type Segment, type Sticker } from "./common";
 
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 const LABEL = 96;   // width of the track names column (px)
 const MAX_ZOOM = 30;
 
-export function Timeline({ duration, time, onSeek, segs, edited, selected, onSelect, parts, selectedPart, onSelectPart,
+/**
+ * One subtitle line on its track. A long video has thousands: each is only drawn again when it changes itself
+ * (its text, selected, the zoom), not when another line is typed in.
+ */
+const SubClip = memo(function SubClip({ s, i, pps, speakers, on, edited, onPick }: {
+  s: Segment; i: number; pps: number; speakers: number; on: boolean; edited: boolean; onPick: (i: number, t: number) => void;
+}) {
+  return (
+    <div className={`tl-clip sub ${speakers ? `spk s${(s.speaker ?? 0) % 6}` : ""} ${on ? "on" : ""} ${s.km.trim() ? "" : "empty"}`}
+      style={{ left: s.start * pps, width: Math.max(4, (s.end - s.start) * pps - 1) }} title={`${clock(s.start)} ${s.km}`}
+      onPointerDown={(e) => { e.stopPropagation(); onPick(i, s.start); }}>
+      {edited && <i className="dot" title="Edited: its voice is made again in a moment" />}
+      <span className="km">{s.km}</span>
+    </div>
+  );
+});
+
+/** The playhead: the only part of the timeline that moves while playing, so the only one drawn again then. */
+function Head({ playhead, pps, zoom, scroller, onDrag }: {
+  playhead: Playhead; pps: number; zoom: number; scroller: React.RefObject<HTMLDivElement | null>; onDrag: (e: React.PointerEvent) => void;
+}) {
+  const time = usePlayhead(playhead);
+  // keep the playhead in view while playing
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || zoom === 1) return;
+    const px = time * pps, view = el.clientWidth - LABEL;
+    if (px < el.scrollLeft || px > el.scrollLeft + view - 40) el.scrollLeft = px - view * 0.2;
+  }, [time, zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <div className="tl-playhead" style={{ left: time * pps }} onPointerDown={onDrag} />;
+}
+
+export const Timeline = memo(function Timeline({ duration, playhead, onSeek, segs, edited, selected, onSelect, parts, selectedPart, onSelectPart,
   trim, onTrim, speakers, cuts, selectedCut, onSelectCut, marks, stickers, selectedSticker, onSelectSticker }: {
-  duration: number; time: number; onSeek: (t: number) => void;
+  duration: number; playhead: Playhead; onSeek: (t: number) => void;
   segs: Segment[] | null; edited: Set<number>; selected: number | null; onSelect: (i: number | null) => void;
   parts: Part[]; selectedPart: number | null; onSelectPart: (i: number | null) => void;
   trim: { from: number; to: number } | null; onTrim?: (t: { from: number; to: number }) => void; speakers: number;
@@ -39,13 +71,10 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
   const x = (t: number) => t * pps;
   const step = STEPS.find((s) => s * pps >= 70) ?? 600;
 
-  // keep the playhead in view while playing
-  useEffect(() => {
-    const el = scroller.current;
-    if (!el || zoom === 1) return;
-    const px = x(time), view = el.clientWidth - LABEL;
-    if (px < el.scrollLeft || px > el.scrollLeft + view - 40) el.scrollLeft = px - view * 0.2;
-  }, [time, zoom]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a line clicked: the same function every time, so the lines that didn't change aren't drawn again
+  const latest = useRef({ onSelect, onSeek });
+  latest.current = { onSelect, onSeek };
+  const pick = useCallback((i: number, t: number) => { latest.current.onSelect(i); latest.current.onSeek(t); }, []);
 
   // Ctrl + wheel: zoom, keeping the moment under the pointer where it is
   const zoomRef = useRef({ zoom, pps });
@@ -144,12 +173,7 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
             </div>
             <div className="tl-track">
               {segs?.map((s, i) => (
-                <div key={i} className={`tl-clip sub ${speakers ? `spk s${(s.speaker ?? 0) % 6}` : ""} ${selected === i ? "on" : ""} ${s.km.trim() ? "" : "empty"}`}
-                  style={{ left: x(s.start), width: Math.max(4, x(s.end - s.start) - 1) }} title={`${clock(s.start)} ${s.km}`}
-                  onPointerDown={(e) => { e.stopPropagation(); onSelect(i); onSeek(s.start); }}>
-                  {edited.has(i) && <i className="dot" title="Edited: its voice is made again in a moment" />}
-                  <span className="km">{s.km}</span>
-                </div>
+                <SubClip key={i} s={s} i={i} pps={pps} speakers={speakers} on={selected === i} edited={edited.has(i)} onPick={pick} />
               ))}
             </div>
             <div className="tl-track">
@@ -169,10 +193,10 @@ export function Timeline({ duration, time, onSeek, segs, edited, selected, onSel
                 </div>
               ))}
             </div>
-            <div className="tl-playhead" style={{ left: x(time) }} onPointerDown={(e) => drag(e, "seek")} />
+            <Head playhead={playhead} pps={pps} zoom={zoom} scroller={scroller} onDrag={(e) => drag(e, "seek")} />
           </div>
         </div>
       </div>
     </div>
   );
-}
+});

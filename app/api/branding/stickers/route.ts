@@ -1,19 +1,25 @@
 import { fs } from "@/lib/rt";
 import { listStickers, saveSticker, stickerPath } from "@/lib/branding";
+import { forbidden } from "@/lib/guard";
+import { MB, readBody, uploadFailed } from "@/lib/limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** The sticker library (images kept for every video). */
-export function GET() {
+export function GET(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   return Response.json(listStickers().map((file) => ({ file, url: `/api/branding/stickers/${encodeURIComponent(file)}` })));
 }
 
 /** Upload: the image is the request body, its file name in ?name=. */
 export async function POST(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   const name = new URL(req.url).searchParams.get("name") || "";
-  const data = Buffer.from(await req.arrayBuffer());
-  if (!data.length || data.length > 20 * 1024 * 1024) return Response.json({ detail: "A sticker must be under 20 MB" }, { status: 400 });
+  let data: Buffer;
+  try { data = await readBody(req, 20 * MB, "A sticker"); } catch (e) { return uploadFailed(e); } // stops at the limit, not after
   try {
     const file = saveSticker(name, data);
     return Response.json({ file, url: `/api/branding/stickers/${encodeURIComponent(file)}` });
@@ -23,6 +29,8 @@ export async function POST(req: Request) {
 }
 
 export function DELETE(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   const f = stickerPath(new URL(req.url).searchParams.get("file") || "");
   if (f) fs.rmSync(f, { force: true });
   return Response.json({ ok: true });

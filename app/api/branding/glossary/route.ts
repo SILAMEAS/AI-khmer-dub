@@ -9,7 +9,11 @@ export function GET() {
 }
 
 export async function POST(req: Request) {
-  const g = parseGlossary(await req.json().catch(() => []));
+  let body: unknown;
+  // a body that is not a JSON list is refused: read as "no words" it would wipe the whole glossary
+  try { body = await req.json(); } catch { body = undefined; }
+  if (!Array.isArray(body)) return Response.json({ detail: "Bad request" }, { status: 400 });
+  const g = parseGlossary(body);
   saveGlossary(g);
   return Response.json(g);
 }

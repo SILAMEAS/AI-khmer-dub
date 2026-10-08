@@ -1,8 +1,7 @@
 import { fs, path } from "@/lib/rt";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import type { ReadableStream as WebStream } from "node:stream/web";
 import { clipFile, saveClipFile, type ClipKind } from "@/lib/branding";
+import { forbidden } from "@/lib/guard";
+import { GB, saveBody, sendFile, uploadFailed } from "@/lib/limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +12,12 @@ const kindOf = (req: Request): ClipKind | null => {
   return k === "intro" || k === "outro" ? k : null;
 };
 
+// an intro or outro is seconds to a few minutes long; far more than that is a wrong file, not a clip
+const MAX_CLIP = 2 * GB;
+
 export function GET(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   const kind = kindOf(req);
   if (!kind) {
     const info = (k: ClipKind) => { const f = clipFile(k); return f ? { url: `/api/branding/clips?kind=${k}&v=${Math.round(fs.statSync(f).mtimeMs)}` } : null; };
@@ -21,13 +25,13 @@ export function GET(req: Request) {
   }
   const f = clipFile(kind);
   if (!f) return Response.json({ detail: "None" }, { status: 404 });
-  return new Response(Readable.toWeb(fs.createReadStream(f)) as ReadableStream, {
-    headers: { "Content-Type": "video/mp4", "Content-Length": String(fs.statSync(f).size), "Cache-Control": "no-store" },
-  });
+  return sendFile(f, { "Content-Type": "video/mp4", "Cache-Control": "no-store" }, "None");
 }
 
 /** Upload: the video is the request body (streamed to disk), its file name in ?name=. */
 export async function POST(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   const kind = kindOf(req);
   const name = new URL(req.url).searchParams.get("name") || "";
   if (!kind || !req.body) return Response.json({ detail: "Say which clip: intro or outro" }, { status: 400 });
@@ -35,16 +39,13 @@ export async function POST(req: Request) {
   try { file = saveClipFile(kind, path.extname(name).toLowerCase()); } catch (e) {
     return Response.json({ detail: (e as Error).message }, { status: 400 });
   }
-  try {
-    await pipeline(Readable.fromWeb(req.body as unknown as WebStream), fs.createWriteStream(file));
-  } catch {
-    fs.rmSync(file, { force: true });
-    return Response.json({ detail: "Upload was interrupted" }, { status: 400 });
-  }
+  try { await saveBody(req, file, MAX_CLIP, "An intro or outro clip"); } catch (e) { return uploadFailed(e); } // no half file is left
   return Response.json({ ok: true });
 }
 
 export function DELETE(req: Request) {
+  const denied = forbidden(req); // checked here, not in proxy.ts (lib/guard.ts)
+  if (denied) return denied;
   const kind = kindOf(req);
   const f = kind && clipFile(kind);
   if (f) fs.rmSync(f, { force: true });

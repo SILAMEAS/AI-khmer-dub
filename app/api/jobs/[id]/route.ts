@@ -1,6 +1,7 @@
 import { fs, path } from "@/lib/rt";
 import { jobDir, jobs } from "@/lib/jobs";
 import { stemsReady } from "@/lib/clone";
+import { downloadActive } from "@/lib/download";
 import { shapeFile, SHAPES } from "@/lib/branding";
 
 export const runtime = "nodejs";
@@ -22,8 +23,12 @@ export async function DELETE(_req: Request, { params }: Ctx) {
   const { id } = await params;
   const job = jobs.get(id);
   if (!job) return Response.json({ detail: "Job not found" }, { status: 404 });
-  if (job.status === "queued" || job.status === "running") {
-    return Response.json({ detail: "Job is still running" }, { status: 409 });
+  if (job.status === "queued" || job.status === "running" || job.task) {
+    return Response.json({ detail: job.task ? "Wait until the voices are separated from the music" : "Job is still running" }, { status: 409 });
+  }
+  // a link's picture can still be coming down after the job failed: the downloader would write into a deleted folder
+  if (downloadActive(jobDir(id))) {
+    return Response.json({ detail: "The video is still being downloaded or stopped - try again in a moment" }, { status: 409 });
   }
   try { // files first: if one is in use (open in a player or Explorer) the job stays listed
     fs.rmSync(jobDir(id), { recursive: true, force: true, maxRetries: 3 });

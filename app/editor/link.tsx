@@ -19,6 +19,7 @@ export function LinkBox({ value, onChange, size }: { value: string; onChange: (v
   const [error, setError] = useState("");
   const [tries, setTries] = useState(0);
   const current = useRef("");
+  const asked = useRef(0); // number of the latest link request
 
   // a pasted link starts by itself (a moment after the last change, so typing doesn't start anything)
   useEffect(() => {
@@ -27,12 +28,14 @@ export function LinkBox({ value, onChange, size }: { value: string; onChange: (v
     current.current = text;
     if (!/https?:\/\//i.test(text)) return;
     const t = setTimeout(async () => {
+      // only the newest request may hide the spinner: an older one ending late must not, while the newer still waits
+      const ask = ++asked.current;
       setAsking(true);
       try {
         const s = await api<Status>("/api/link", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: text, size }) });
         if (current.current === text) setStatus(s);
-      } catch (e) { if (current.current === text) setError((e as Error).message); } finally { setAsking(false); }
+      } catch (e) { if (current.current === text) setError((e as Error).message); } finally { if (ask === asked.current) setAsking(false); }
     }, 700);
     return () => clearTimeout(t);
   }, [value, tries]); // eslint-disable-line react-hooks/exhaustive-deps

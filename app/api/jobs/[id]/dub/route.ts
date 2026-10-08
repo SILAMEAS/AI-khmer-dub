@@ -16,11 +16,13 @@ type Body = {
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const job = jobs.get((await params).id);
   if (!job) return Response.json({ detail: "Job not found" }, { status: 404 });
+  if (!job.meta) return Response.json({ detail: "This job has no transcription - start a new one" }, { status: 409 });
+  let b: Body;
+  try { b = await req.json(); } catch { return Response.json({ detail: "Bad request" }, { status: 400 }); }
+  // checked after the body is read, with no waiting until it is queued: two quick clicks cannot both start it
   if (job.status === "queued" || job.status === "running") {
     return Response.json({ detail: "Job is still running" }, { status: 409 });
   }
-  if (!job.meta) return Response.json({ detail: "This job has no transcription - start a new one" }, { status: 409 });
-  const b: Body = await req.json();
   if (b.voice) {
     const err = voiceError(b.voice);
     if (err) return Response.json({ detail: err }, { status: 400 });
@@ -41,7 +43,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     for (const e of b.segments) {
       if (!segs[e.i]) continue;
       segs[e.i].km = String(e.km).trim();
-      if (e.voice && e.voice in VOICES) segs[e.i].voice = e.voice as Voice;
+      if (e.voice && Object.hasOwn(VOICES, e.voice)) segs[e.i].voice = e.voice as Voice;
       const known = job.meta.speakers ?? 0;
       if (Number.isInteger(e.speaker) && e.speaker! >= 0 && e.speaker! < known) segs[e.i].speaker = e.speaker;
     }

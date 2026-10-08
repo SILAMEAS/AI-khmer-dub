@@ -2,6 +2,7 @@ import { fs, path } from "@/lib/rt";
 import { parseFx, parseLogo, parseOut, parseSubStyle } from "@/lib/branding";
 import { parseEdit } from "@/lib/edit";
 import { jobDir, jobs } from "@/lib/jobs";
+import { badRequest, jsonBody, latestOnly, previewFailed } from "@/lib/limits";
 import { editOnly, previewFrame } from "@/lib/pipeline";
 
 export const runtime = "nodejs";
@@ -14,13 +15,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!editOnly(job.opts) && !fs.existsSync(path.join(jobDir(job.id), "km.srt"))) {
     return Response.json({ detail: "No Khmer subtitles yet" }, { status: 409 });
   }
-  const b: { sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; edit?: unknown; t?: number } = await req.json();
-  const t = Math.max(0, Math.min(job.meta.duration - 0.1, Number(b.t) || 0));
+  const b = await jsonBody<{ sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; edit?: unknown; t?: number }>(req);
+  if (!b) return badRequest();
+  const meta = job.meta;
+  const t = Math.max(0, Math.min(meta.duration - 0.1, Number(b.t) || 0));
   try {
-    const png = await previewFrame(jobDir(job.id), { ...job.opts, sub: parseSubStyle(b.sub), logo: parseLogo(b.logo), out: parseOut(b.out), fx: parseFx(b.fx), edit: parseEdit(b.edit) },
-      job.meta, t);
+    // one still at a time per project: a newer request (another slider step) takes the place of an older one
+    const png = await latestOnly(`frame:${job.id}`, req.signal, (signal) => previewFrame(jobDir(job.id),
+      { ...job.opts, sub: parseSubStyle(b.sub), logo: parseLogo(b.logo), out: parseOut(b.out), fx: parseFx(b.fx), edit: parseEdit(b.edit) },
+      meta, t, signal));
     return new Response(new Uint8Array(png), { headers: { "Content-Type": "image/png", "Cache-Control": "no-store" } });
   } catch (e) {
-    return Response.json({ detail: e instanceof Error ? e.message : String(e) }, { status: 500 });
+    return previewFailed(e);
   }
 }

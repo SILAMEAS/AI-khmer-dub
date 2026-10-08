@@ -1,4 +1,5 @@
 import { extractUrl, prefetchStatus, startPrefetch } from "@/lib/download";
+import { badRequest, jsonBody } from "@/lib/limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +13,9 @@ const view = (p: NonNullable<ReturnType<typeof prefetchStatus>>) => ({
  * the work already under way. Answers once the site has said what the link is: title, length, or why not.
  */
 export async function POST(req: Request) {
-  const { url: text, size } = await req.json().catch(() => ({ url: "" }));
+  const body = await jsonBody<{ url?: unknown; size?: unknown }>(req);
+  if (!body) return badRequest();
+  const { url: text, size } = body;
   const url = extractUrl(String(text ?? ""));
   if (!url) return Response.json({ detail: "No video link found in what was pasted - copy the link of the video page (https://...)" }, { status: 400 });
   const p = await startPrefetch(url, [480, 720, 1080].includes(Number(size)) ? Number(size) : 1080);

@@ -117,7 +117,7 @@ It is a `.cmd` file on purpose: new Windows PCs block PowerShell scripts (`.ps1`
 |   | **Visual C++ runtime** | installed when missing (whisper.cpp and PyTorch need it; Windows asks for permission once) | Windows | small |
 |   | Node packages | `npm install` (Next.js, React, msedge-tts) | `node_modules/` | ~0.5 GB |
 | 2 | **ffmpeg** | **downloaded**: gyan.dev's full build (`.zip` from GitHub; it has rubberband and draws Khmer subtitles correctly – other builds don't), or copied in if that build is already on the PC | `bin/` | ~0.4 GB |
-| 3 | **whisper.cpp** | speech recognition program (newest Windows build); only the 2 programs the app uses are kept | `bin/whisper/` | small |
+| 3 | **whisper.cpp** | speech recognition program (build b5454, the one tested with this app); only the 2 programs the app uses are kept | `bin/whisper/` | small |
 |   | **yt-dlp** | downloads videos from links (updates itself once a day) | `bin/yt-dlp.exe` | small |
 |   | **aria2c** | downloads each video file over 8 connections at once | `bin/aria2c.exe` | small |
 |   | **Deno** | runs YouTube's JavaScript for yt-dlp (without it: 480p at most, or "not a bot" errors) | `bin/deno.exe` | ~0.1 GB |
@@ -141,8 +141,12 @@ download that fails is tried again (3 times).
 
 ### Setup options
 
-You normally don't need these: `start.cmd` runs setup for you. To choose options, run setup yourself once –
-`start.cmd` remembers your choice (for example `--no-clone`) next time.
+You normally don't need these: `start.cmd` runs setup for you. To choose options, add them to `start.cmd`
+(`.\start.cmd --no-clone`) or run setup yourself – `start.cmd` remembers your choice next time.
+
+Voice cloning is optional: if it cannot be installed (no internet, a blocked download), setup says so, the app
+starts anyway with the AI voices, and setup tries again the next time `start.cmd` runs. A setup that is already
+up to date takes about half a minute and works offline.
 
 ```powershell
 npm run setup                   # everything (recommended)
@@ -160,6 +164,9 @@ npm run setup -- --clean        # reinstall all programs and packages from scrat
 |---|---|
 | `Node.js 20.9 or newer is needed` | you ran `npm run setup` with an old Node.js: use `start.cmd` (it brings its own Node.js), or install the current LTS from <https://nodejs.org> |
 | `whisper-cli failed (code 3221225781)` | a DLL is missing (the Visual C++ runtime): run `start.cmd` again – setup installs it – or install <https://aka.ms/vs/17/release/vc_redist.x64.exe> |
+| Downloads fail at work or school (a proxy) | `start.cmd` uses the proxy Windows is set to (also an automatic "PAC" script) for everything. A proxy that needs a password: set it yourself first, `$env:HTTPS_PROXY = "http://user:password@proxy:8080"`, then `.\start.cmd`. The proxy in the app's network settings is used too (a `socks5://` one only for video links) |
+| `This PC has an ARM processor with Windows 10` | the programs are made for x64 PCs; Windows 11 on ARM runs them, Windows 10 on ARM cannot |
+| `Setup is already running in another window` | `start.cmd` was opened twice during the install: wait for the first window to finish |
 | Anything else that keeps failing | `npm run setup -- --clean`, then `start.cmd` – reinstalls everything except the big model downloads |
 | A download of ffmpeg, Python or Node.js failed | check the internet connection and run `start.cmd` again; or put `ffmpeg.exe` + `ffprobe.exe` into `bin\`, or set `$env:PYTHON` to a Python 3.12 |
 | `running scripts is disabled on this system` | you ran `start.ps1` directly – use `start.cmd` instead |

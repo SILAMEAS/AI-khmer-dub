@@ -121,11 +121,22 @@ function wavReader(file: string) {
  * Measures every line in the 16 kHz track and decides boy or girl.
  * Lines with unclear pitch (music, whispering, very short) take the voice of the nearest clear line.
  */
-export function analyzeLines(wav: string, lines: { start: number; end: number }[]): VoiceInfo[] {
+export async function analyzeLines(wav: string, lines: { start: number; end: number }[],
+                                   onProgress?: (frac: number) => void): Promise<VoiceInfo[]> {
   const r = wavReader(wav);
-  let infos: ReturnType<typeof voiceInfo>[];
+  const infos: ReturnType<typeof voiceInfo>[] = [];
   try {
-    infos = lines.map((l) => voiceInfo(r.read(l.start, Math.min(l.end, l.start + MAX_SECONDS))));
+    // A 2-4 hour film is many seconds of pitch tracking, and the server answers no request meanwhile (the editor,
+    // other jobs' progress): every ~30 ms it lets them through. A worker thread would not survive the app's bundling.
+    let pause = Date.now();
+    for (const l of lines) {
+      infos.push(voiceInfo(r.read(l.start, Math.min(l.end, l.start + MAX_SECONDS))));
+      if (Date.now() - pause > 30) {
+        onProgress?.(infos.length / lines.length);
+        await new Promise((go) => setImmediate(go));
+        pause = Date.now();
+      }
+    }
   } finally { r.close(); }
 
   const votes = infos.filter((v) => v.low).map((v) => v.low < SPLIT);

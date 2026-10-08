@@ -14,11 +14,13 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const job = jobs.get((await params).id);
   if (!job) return Response.json({ detail: "Job not found" }, { status: 404 });
+  type Body = { burn?: boolean; sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; mix?: unknown; bgMode?: string; edit?: unknown };
+  let b: Body;
+  try { b = await req.json(); } catch { return Response.json({ detail: "Bad request" }, { status: 400 }); }
+  // checked after the body is read, with no waiting until it is queued: two quick clicks cannot both start it
   if (job.status === "queued" || job.status === "running") {
     return Response.json({ detail: "Job is still running" }, { status: 409 });
   }
-  const b: { burn?: boolean; sub?: unknown; logo?: unknown; out?: unknown; fx?: unknown; mix?: unknown; bgMode?: string; edit?: unknown } =
-    await req.json();
   // a project only edited always mixes its own sound; a dub needs its Khmer voice track (or a mix made before)
   const sound = editOnly(job.opts) || !!(b.mix || b.bgMode);
   const needs = editOnly(job.opts) ? null : sound ? "voice_track.m4a" : "dub_audio.m4a";

@@ -42,8 +42,43 @@ const TOTAL = wantClone ? 8 : 6;
 const step = (title) => console.log(`\n[${++stepNo}/${TOTAL}] ${title}`);
 const ok = (msg) => console.log(`  ✓ ${msg}`);
 const fail = (msg) => { console.error(`\n✗ ${msg}`); process.exit(1); };
+// a part that could not be updated (e.g. no internet) but still works: the app starts, setup runs again next time
+let incomplete = false;
+
+// One setup at a time: a second one (start.cmd opened twice during the first install) would delete the first
+// one's half-finished downloads and install the same packages at the same time.
+const lockFile = path.join(root, ".setup.lock");
+const otherPid = fs.existsSync(lockFile) ? Number(fs.readFileSync(lockFile, "utf8")) : 0;
+if (otherPid && otherPid !== process.pid) {
+  let alive = true;
+  try { process.kill(otherPid, 0); } catch (e) { alive = e.code === "EPERM"; } // ESRCH: that setup is gone
+  if (alive) fail(`Setup is already running in another window (process ${otherPid}) - wait for it to finish.`);
+}
+fs.writeFileSync(lockFile, String(process.pid));
+process.on("exit", () => { try { if (fs.readFileSync(lockFile, "utf8") === String(process.pid)) fs.rmSync(lockFile); } catch { /* gone */ } });
 
 // ---------------------------------------------------------------- helpers
+
+// Behind a proxy (start.ps1 puts Windows' proxy in HTTPS_PROXY) Node's fetch() can't get out - it ignores
+// proxies. Windows' own curl.exe follows HTTPS_PROXY, so downloads go through it then.
+const proxied = !!(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy);
+const curlExe = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "curl.exe");
+const viaCurl = proxied && win && fs.existsSync(curlExe);
+if (viaCurl) console.log(`Downloading through the proxy ${process.env.HTTPS_PROXY || process.env.HTTP_PROXY}`);
+
+/** The text at an address (JSON of the GitHub API, etc.); null when it can't be reached. */
+async function getText(url, timeoutMs = 30_000) {
+  if (viaCurl) {
+    try {
+      return execFileSync(curlExe, ["-sSL", "--fail", "-m", String(timeoutMs / 1000), "-A", "khmer-dubber", url],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, maxBuffer: 64 << 20 });
+    } catch { return null; }
+  }
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": "khmer-dubber" }, signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok ? await res.text() : null;
+  } catch { return null; }
+}
 
 // A file only gets its final name once it is complete, so a file that is there is a whole one.
 // A dropped connection or a cut-short file is tried again (3 times).
@@ -52,6 +87,12 @@ async function download(url, dest, label) {
   const tmp = dest + ".part";
   for (let attempt = 1; ; attempt++) {
     try {
+      if (viaCurl) {
+        console.log(`    ${label}...`);
+        execFileSync(curlExe, ["-L", "--fail", "-sS", "--retry", "2", "-A", "khmer-dubber", "-o", tmp, url], { stdio: "inherit", windowsHide: true });
+        fs.renameSync(tmp, dest);
+        return ok(label);
+      }
       const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "khmer-dubber" } });
       if (!res.ok) throw new Error(`${label}: HTTP ${res.status} for ${url}`);
       const total = Number(res.headers.get("content-length")) || 0;
@@ -183,22 +224,17 @@ if (win) {
   ok("Microsoft Visual C++ runtime");
 }
 
-// Node packages. npm keeps a copy of the lock file in node_modules: a newer package-lock.json (git pull) means
-// new packages. A node_modules that is broken (an interrupted install, or copied from another PC) is rebuilt.
-const installed = path.join(root, "node_modules", ".package-lock.json");
+// Node packages: exactly those in package-lock.json (npm ci; npm install could rewrite the lock file, and git
+// pull then refuses to update it). Installed again when the lock file's content changed (git pull) or when
+// node_modules is broken (an interrupted install, or copied from another PC).
+const lockHash = createHash("sha256").update(fs.readFileSync(path.join(root, "package-lock.json"), "utf8").replace(/\r/g, "")).digest("hex");
+const lockMark = path.join(root, "node_modules", ".installed-lock");
 const nextOk = () => healthy(process.execPath, [path.join(root, "node_modules", "next", "dist", "bin", "next"), "--version"]);
-if (!fs.existsSync(installed) || !nextOk()
-    || fs.statSync(path.join(root, "package-lock.json")).mtimeMs > fs.statSync(installed).mtimeMs) {
-  try {
-    execSync("npm install", { cwd: root, stdio: "inherit" });
-  } catch { /* tried again below */ }
-  if (!nextOk()) {
-    console.log("  Node packages are broken - installing them again from scratch");
-    fs.rmSync(path.join(root, "node_modules"), { recursive: true, force: true });
-    execSync("npm ci", { cwd: root, stdio: "inherit" });
-  }
+if (!nextOk() || !fs.existsSync(lockMark) || fs.readFileSync(lockMark, "utf8") !== lockHash) {
+  execSync("npm ci --prefer-offline --no-audit --no-fund", { cwd: root, stdio: "inherit" });
+  if (!nextOk()) fail("The Node packages could not be installed - see the message above.");
+  fs.writeFileSync(lockMark, lockHash);
 }
-if (!nextOk()) fail("The Node packages could not be installed - see the message above.");
 ok("Node packages");
 
 // ---------------------------------------------------------------- 2. ffmpeg
@@ -233,16 +269,20 @@ if (!ffmpeg) {
   } else if (win) {
     // gyan.dev's full build, straight into ./bin: it has rubberband, and its subtitle renderer shapes Khmer
     // correctly (other builds tested draw subscript consonants and vowels out of place). The same build is on
-    // GitHub as a .zip (faster, and every Windows can unpack it); gyan.dev's own .7z is the fallback.
-    let url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z", ext = ".7z";
-    try {
-      const rel = await (await fetch("https://api.github.com/repos/GyanD/codexffmpeg/releases/latest",
-        { headers: { "User-Agent": "khmer-dubber" } })).json();
-      const asset = rel.assets?.find((a) => /full_build\.zip$/.test(a.name));
-      if (asset) ({ browser_download_url: url } = asset), ext = ".zip";
-    } catch { /* GitHub not reachable: gyan.dev */ }
-    const archive = path.join(bin, "ffmpeg" + ext), tmpDir = path.join(bin, "ffmpeg-tmp");
-    await download(url, archive, "ffmpeg (full build)");
+    // GitHub as a .zip (faster, and every Windows can unpack it), pinned to the version tested with Khmer
+    // subtitles - every PC gets the same one. gyan.dev's own .7z (its newest) is the fallback.
+    const FFMPEG_VERSION = "9.0.2";
+    const sources = [
+      [`https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/ffmpeg-${FFMPEG_VERSION}-full_build.zip`, ".zip"],
+      ["https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z", ".7z"],
+    ];
+    let archive = "";
+    const tmpDir = path.join(bin, "ffmpeg-tmp");
+    for (const [url, ext] of sources) {
+      archive = path.join(bin, "ffmpeg" + ext);
+      try { await download(url, archive, `ffmpeg ${ext === ".zip" ? FFMPEG_VERSION : "(newest)"}`); break; }
+      catch (e) { if (ext === ".7z") throw e; console.log(`    GitHub not reachable (${e.message}) - trying gyan.dev`); }
+    }
     try {
       unzip(archive, tmpDir); // Windows' tar reads .zip (and .7z on Windows 11)
     } catch { // a .7z on older Windows: 7-Zip's own small command-line extractor
@@ -279,15 +319,14 @@ if (fs.existsSync(whisperDir) && !healthy(whisperCli, ["--help"])) {
   console.log("  whisper.cpp is missing or does not start - downloading it again");
   fs.rmSync(whisperDir, { recursive: true, force: true });
 }
+// The build this app was tested with: every PC gets the same one (a newer one may need other files, or behave
+// differently), and no GitHub API call is needed (it allows only 60 calls an hour per internet address).
+const WHISPER_BUILD = "b5454";
 if (!fs.existsSync(whisperCli)) {
-  // The newest release sometimes has no binaries yet: take the newest one that does.
-  const releases = await (await fetch("https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=10",
-    { headers: { "User-Agent": "khmer-dubber" } })).json();
-  const rel = releases.find((r) => r.assets?.some((a) => a.name === "whisper-bin-x64.zip"));
-  if (!rel) throw new Error("Could not find whisper-bin-x64.zip in recent whisper.cpp releases");
-  const asset = rel.assets.find((a) => a.name === "whisper-bin-x64.zip");
+  const rel = { tag_name: WHISPER_BUILD };
   const zip = path.join(bin, "whisper.zip");
-  await download(asset.browser_download_url, zip, `whisper.cpp ${rel.tag_name}`);
+  await download(`https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_BUILD}/whisper-bin-x64.zip`, zip,
+    `whisper.cpp ${rel.tag_name}`);
   unzip(zip, whisperDir);
   fs.unlinkSync(zip);
   const found = findFile(whisperDir, "whisper-cli.exe"); // a release laid out differently: move it into Release/
@@ -309,6 +348,11 @@ for (const d of fs.readdirSync(whisperDir)) {
 }
 for (const f of fs.readdirSync(path.dirname(whisperCli))) {
   if (!/^(whisper-cli\.exe|whisper-vad-speech-segments\.exe|whisper\.dll|ggml[\w-]*\.dll)$/i.test(f)) fs.rmSync(path.join(path.dirname(whisperCli), f), { recursive: true, force: true });
+}
+// still starting without the removed files? (otherwise the next run downloads it whole again)
+if (!healthy(whisperCli, ["--help"])) {
+  fs.rmSync(whisperDir, { recursive: true, force: true });
+  fail("whisper.cpp needs a file that was removed - run start.cmd again (it is downloaded again).");
 }
 dropIfBroken(path.join(bin, "yt-dlp.exe"), ["--version"], "yt-dlp");
 dropIfBroken(path.join(bin, "deno.exe"), ["--version"], "Deno");
@@ -403,7 +447,9 @@ if (wantClone) {
   if (win && fs.existsSync(cfgFile) && fs.existsSync(ownPython)) {
     const home = (fs.readFileSync(cfgFile, "utf8").match(/^home\s*=\s*(.+)$/m) ?? [])[1]?.trim();
     const own = path.dirname(ownPython);
-    if (home && path.resolve(home).toLowerCase() !== own.toLowerCase()) {
+    // compared as real paths: the same folder reached through a link (junction) is not a move
+    const real = (p) => { try { return fs.realpathSync.native(p).toLowerCase(); } catch { return null; } };
+    if (home && real(home) !== real(own)) {
       console.log(`  The project folder was moved: pointing the Python environment at ${own}`);
       fs.writeFileSync(cfgFile, fs.readFileSync(cfgFile, "utf8").split(home).join(own));
     }
@@ -424,12 +470,23 @@ if (wantClone) {
   async function makeVenv() {
     let base = process.env.PYTHON ? findPython() : await portablePython();
     if (!base) base = findPython(); // not Windows: the system's python3.11 / 3.12
-    if (!base) fail("Python 3.11 or 3.12 is needed - install it, or set PYTHON to its python.exe, then run npm run setup again.");
+    if (!base) throw new Error("Python 3.11 or 3.12 is needed - install it, or set PYTHON to its python.exe");
     ok(`Python: ${base}`);
     sh(base, ["-m", "venv", path.join(py, "venv")]);
   }
-  if (!fs.existsSync(venvPy)) await makeVenv();
-  ok("Python environment in ./py/venv");
+  // Voice cloning is optional: when a part of it cannot be installed, the app still starts (with the AI
+  // voices), and setup tries again next time.
+  let cloneBroken = false;
+  const cloneFailed = (e) => {
+    cloneBroken = true; incomplete = true;
+    console.warn(`
+  ! Voice cloning could not be installed: ${e.message ?? e}`);
+    console.warn("    The app works without it (AI voices). Setup tries again the next time start.cmd runs.");
+  };
+  try {
+    if (!fs.existsSync(venvPy)) await makeVenv();
+    ok("Python environment in ./py/venv");
+  } catch (e) { cloneFailed(e); }
 
   step("Voice cloning packages and models (~5 GB, takes a while the first time)");
   const pip = (...a) => sh(venvPy, ["-m", "pip", "install", "--quiet", ...a]);
@@ -455,65 +512,84 @@ if (wantClone) {
       }
     }
   }
+  // versions this app was tested with
+  const PACKAGES = [
+    ["PyTorch (CPU)", "torch==2.14.1", "torchaudio==2.11.0", "--index-url", "https://download.pytorch.org/whl/cpu"],
+    ["Voice separation and cloning packages", "numpy==2.5.3", "scipy==1.18.1", "librosa==1.0.0", "soundfile==0.14.0",
+      "munch==4.0.0", "einops==0.8.2", "transformers==4.57.6", "huggingface_hub==0.36.2", "pyyaml==6.0.3",
+      "matplotlib==3.11.2", "demucs==4.1.0", "openvino==2026.4.1"], // openvino: voice separation on Intel graphics and CPUs
+  ];
+  // installed is not enough: they have to load (a missing DLL or a mix of versions shows up only here)
+  const packagesLoad = () => tryRun(venvPy, ["-c",
+    "import torch, torchaudio, numpy, scipy, librosa, soundfile, transformers, demucs, openvino; print('ok')"]) === "ok";
+  // the package list installed last time: the same list, still loading, needs no pip (fast, and works offline)
+  const installedMark = path.join(py, "venv", ".packages.json"), wanted = JSON.stringify(PACKAGES);
   function installPackages() {
     removeBrokenPackages();
-    pip("--upgrade", "pip");
-    // versions this app was tested with
-    console.log("  PyTorch (CPU)...");
-    pip("torch==2.14.1", "torchaudio==2.11.0", "--index-url", "https://download.pytorch.org/whl/cpu");
-    console.log("  Voice separation and cloning packages...");
-    pip("numpy==2.5.3", "scipy==1.18.1", "librosa==1.0.0", "soundfile==0.14.0", "munch==4.0.0", "einops==0.8.2",
-      "transformers==4.57.6", "huggingface_hub==0.36.2", "pyyaml==6.0.3", "matplotlib==3.11.2", "demucs==4.1.0",
-      "openvino==2026.4.1"); // runs the voice separation model on Intel graphics and CPUs
-    // installed is not enough: they have to load (a missing DLL or a mix of versions shows up only here)
-    sh(venvPy, ["-c", "import torch, torchaudio, numpy, scipy, librosa, soundfile, transformers, demucs, openvino"]);
+    try { pip("--upgrade", "pip"); } catch { console.log("  (pip could not update itself - carrying on with this one)"); }
+    for (const [label, ...pkgs] of PACKAGES) { console.log(`  ${label}...`); pip(...pkgs); }
+    if (!packagesLoad()) throw new Error("the Python packages are installed but do not load");
+    fs.writeFileSync(installedMark, wanted);
   }
-  try {
-    installPackages();
-  } catch {
-    // a damaged environment (an interrupted install, packages of different versions): build it again, once
-    console.log("\n  The Python packages are broken - rebuilding the Python environment from scratch");
-    fs.rmSync(path.join(py, "venv"), { recursive: true, force: true });
-    await makeVenv();
-    installPackages();
-  }
-  ok("Python packages");
-
-  // Seed-VC (zero-shot voice conversion) source, pinned to the tested commit; a zip, so git is not needed
-  const SEED_VC_COMMIT = "51383efd921027683c89e5348211d93ff12ac2a8";
-  const seedVc = path.join(py, "src", "seed-vc");
-  if (!fs.existsSync(path.join(seedVc, "inference.py"))) {
-    const zip = path.join(tmp, "seed-vc.zip");
-    await download(`https://codeload.github.com/Plachtaa/seed-vc/zip/${SEED_VC_COMMIT}`, zip, "Seed-VC download");
-    const out = path.join(py, "src");
-    fs.rmSync(seedVc, { recursive: true, force: true });
-    unzip(zip, out);
-    fs.renameSync(path.join(out, `seed-vc-${SEED_VC_COMMIT}`), seedVc);
-    fs.unlinkSync(zip);
-  }
-  ok("Seed-VC source");
-  console.log("  Voice models (MDX-Net Kim Vocal 2, Demucs, Seed-VC, Whisper-small, BigVGAN)...");
-  sh(venvPy, [path.join(root, "scripts", "voice_clone.py"), "download", "-", "-"]);
-  // pip's copies of the downloaded packages (~0.4 GB) are not needed once they are installed
-  fs.rmSync(path.join(py, "cache"), { recursive: true, force: true });
-  // OpenVINO's compiled copy of the separation model (~1.6 GB, makes loading 7 s -> 0.4 s) is made for one
-  // OpenVINO version: after an upgrade a new one is made beside the old one. Start it afresh then.
-  const ovCache = path.join(models, "mdx", "cache"), ovMark = path.join(ovCache, ".openvino-version");
-  const ovVersion = tryRun(venvPy, ["-c", "import openvino; print(openvino.__version__)"]);
-  if (ovVersion && fs.existsSync(ovCache)) {
-    const was = fs.existsSync(ovMark) ? fs.readFileSync(ovMark, "utf8").trim() : null;
-    if (was && was !== ovVersion) { // (no mark yet: the cache was made by this version)
-      console.log(`  OpenVINO changed (${was} -> ${ovVersion}): removing its old compiled models`);
-      for (const f of fs.readdirSync(ovCache)) {
-        try { // OpenVINO makes them read-only
-          fs.chmodSync(path.join(ovCache, f), 0o666);
-          fs.rmSync(path.join(ovCache, f), { recursive: true, force: true });
-        } catch { /* in use by the running app: next time */ }
+  if (cloneBroken) { /* no Python environment */ }
+  else if (fs.existsSync(installedMark) && fs.readFileSync(installedMark, "utf8") === wanted && packagesLoad()) {
+    ok("Python packages already installed");
+  } else {
+    try {
+      installPackages();
+    } catch (e) {
+      const online = (await getText("https://pypi.org/simple/pip/", 15_000)) !== null;
+      if (!online) {
+        // never take a working environment apart because the internet is down
+        if (packagesLoad()) { console.warn("  ! No internet: the Python packages could not be updated - using the installed ones"); incomplete = true; }
+        else cloneFailed(new Error("no connection to pypi.org to download the Python packages (nothing was removed)"));
+      } else {
+        // a damaged environment (an interrupted install, packages of different versions): build it again, once
+        console.log(`\n  The Python packages are broken (${e.message}) - rebuilding the Python environment from scratch`);
+        fs.rmSync(path.join(py, "venv"), { recursive: true, force: true });
+        try { await makeVenv(); installPackages(); } catch (e2) { cloneFailed(e2); }
       }
     }
-    fs.writeFileSync(ovMark, ovVersion);
+    if (!cloneBroken) ok("Python packages");
   }
-  ok("voice cloning ready");
+  if (!cloneBroken) try {
+
+    // Seed-VC (zero-shot voice conversion) source, pinned to the tested commit; a zip, so git is not needed
+    const SEED_VC_COMMIT = "51383efd921027683c89e5348211d93ff12ac2a8";
+    const seedVc = path.join(py, "src", "seed-vc");
+    if (!fs.existsSync(path.join(seedVc, "inference.py"))) {
+      const zip = path.join(tmp, "seed-vc.zip");
+      await download(`https://codeload.github.com/Plachtaa/seed-vc/zip/${SEED_VC_COMMIT}`, zip, "Seed-VC download");
+      const out = path.join(py, "src");
+      fs.rmSync(seedVc, { recursive: true, force: true });
+      unzip(zip, out);
+      fs.renameSync(path.join(out, `seed-vc-${SEED_VC_COMMIT}`), seedVc);
+      fs.unlinkSync(zip);
+    }
+    ok("Seed-VC source");
+    console.log("  Voice models (MDX-Net Kim Vocal 2, Demucs, Seed-VC, Whisper-small, BigVGAN)...");
+    sh(venvPy, [path.join(root, "scripts", "voice_clone.py"), "download", "-", "-"]);
+    // pip's copies of the downloaded packages (~0.4 GB) are not needed once they are installed
+    fs.rmSync(path.join(py, "cache"), { recursive: true, force: true });
+    // OpenVINO's compiled copy of the separation model (~1.6 GB, makes loading 7 s -> 0.4 s) is made for one
+    // OpenVINO version: after an upgrade a new one is made beside the old one. Start it afresh then.
+    const ovCache = path.join(models, "mdx", "cache"), ovMark = path.join(ovCache, ".openvino-version");
+    const ovVersion = tryRun(venvPy, ["-c", "import openvino; print(openvino.__version__)"]);
+    if (ovVersion && fs.existsSync(ovCache)) {
+      const was = fs.existsSync(ovMark) ? fs.readFileSync(ovMark, "utf8").trim() : null;
+      if (was && was !== ovVersion) { // (no mark yet: the cache was made by this version)
+        console.log(`  OpenVINO changed (${was} -> ${ovVersion}): removing its old compiled models`);
+        for (const f of fs.readdirSync(ovCache)) {
+          try { // OpenVINO makes them read-only
+            fs.chmodSync(path.join(ovCache, f), 0o666);
+            fs.rmSync(path.join(ovCache, f), { recursive: true, force: true });
+          } catch { /* in use by the running app: next time */ }
+        }
+      }
+      fs.writeFileSync(ovMark, ovVersion);
+    }
+    ok("voice cloning ready");
+  } catch (e) { cloneFailed(e); }
 }
 
 // ---------------------------------------------------------------- 7. duplicates and unused files
@@ -555,12 +631,14 @@ keepOnly(path.join(root, "py"), ["python", "venv", "src", "tmp", "cache"], "not 
 keepOnly(path.join(root, "py", "src"), ["seed-vc"], "not used by the app");
 
 // voice models (Hugging Face cache): when a model is updated, the old version stays next to the new one
+// (not while the app runs: it may be downloading a model into there right now)
 const hub = path.join(models, "hf", "hub");
-if (fs.existsSync(hub)) {
+if (fs.existsSync(hub) && !appRunning) {
   for (const repo of fs.readdirSync(hub).filter((d) => d.startsWith("models--"))) {
     const dir = path.join(hub, repo), refs = path.join(dir, "refs"), snaps = path.join(dir, "snapshots");
     if (!fs.existsSync(refs) || !fs.existsSync(snaps)) continue;
-    const current = fs.readdirSync(refs).map((r) => fs.readFileSync(path.join(refs, r), "utf8").trim());
+    const current = fs.readdirSync(refs, { withFileTypes: true }).filter((r) => r.isFile()) // (refs/pr/ is a folder)
+      .map((r) => fs.readFileSync(path.join(refs, r.name), "utf8").trim());
     if (!current.length) continue;
     keepOnly(snaps, current, `older version of ${repo.slice(8).replace("--", "/")}`);
     // with symbolic links the files live in blobs/: keep the ones the current version links to
@@ -597,13 +675,18 @@ else {
 }
 
 // start.ps1 runs setup again only when this fingerprint no longer matches (installer or packages changed)
-// (line endings ignored: git may check the same file out with CRLF or LF)
+// (line endings ignored: git may check the same file out with CRLF or LF; and a byte-order mark, which
+// start.ps1's reading drops - an editor may save one)
 const fingerprint = ["scripts/setup.mjs", "package-lock.json"].map((f) => createHash("sha256")
-  .update(fs.readFileSync(path.join(root, f), "utf8").replace(/\r/g, ""), "utf8").digest("hex").toUpperCase()).join("");
-fs.writeFileSync(path.join(root, ".setup-done.json"),
-  JSON.stringify({ fingerprint, args: args.filter((a) => a !== "--no-build" && a !== "--clean"), at: new Date().toISOString() }, null, 1));
+  .update(fs.readFileSync(path.join(root, f), "utf8").replace(/^﻿/, "").replace(/\r/g, ""), "utf8")
+  .digest("hex").toUpperCase()).join("");
+// something could not be updated (no internet) but works: not marked done, so the next start tries again
+if (!incomplete) {
+  fs.writeFileSync(path.join(root, ".setup-done.json"),
+    JSON.stringify({ fingerprint, args: args.filter((a) => a !== "--no-build" && a !== "--clean"), at: new Date().toISOString() }, null, 1));
+}
 
 console.log(`
-Setup complete.
+Setup complete${incomplete ? " (some parts could not be updated - setup tries again next time)" : ""}.
   Start the app:  start.cmd   ->  http://127.0.0.1:5000
 ${wantClone ? "" : "  Voice cloning was skipped; add it later with: npm run setup\n"}`);

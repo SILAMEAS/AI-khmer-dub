@@ -4,7 +4,7 @@
  * The player in the middle: the video with every setting drawn live on top of it (subtitles, text, logo, filter,
  * cover band, progress bar, fade, shape), or the exported video.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { timeWords } from "@/lib/words";
 import { clock, cutAt, lineAt, punchRanges, zoomAt, type EditOpts, type Segment } from "./common";
 import { ASPECTS, cssFilter, subTextStyle, TITLE_POS, type Look, type OutOpts } from "./look";
@@ -12,7 +12,7 @@ import { ASPECTS, cssFilter, subTextStyle, TITLE_POS, type Look, type OutOpts } 
 const RATIO: Record<Exclude<OutOpts["aspect"], "original">, number> = { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1, "4:5": 4 / 5 };
 const SAMPLE = "សួស្តី! នេះជាចំណងជើងខ្មែរ។", SAMPLE_ORIGINAL = "Hello! These are Khmer subtitles.";
 
-export function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUrl, videoRef, onPlay, onTime, onDuration,
+export const Player = memo(function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUrl, videoRef, onPlay, onTime, onDuration,
   jobId, placeholder, edit, onEdit, selectedSticker, onSelectSticker }: {
   src: string | null; finalSrc: string | null; view: "edit" | "final"; onView: (v: "edit" | "final") => void;
   look: Look; onLook: (l: Look) => void; segs: Segment[] | null; logoUrl: string | null;
@@ -33,6 +33,8 @@ export function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUr
   const [playing, setPlaying] = useState(false);
   const [still, setStill] = useState<string | null>(null);
   const [stillBusy, setStillBusy] = useState(false);
+  // the exact frame is a picture in memory: let it go once another replaces it, or the player closes
+  useEffect(() => () => { if (still) URL.revokeObjectURL(still); }, [still]);
 
   useEffect(() => {
     const el = stage.current;
@@ -42,16 +44,19 @@ export function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUr
     return () => ro.disconnect();
   }, []);
 
-  // the clock: every frame while playing, so the overlays move with the picture
+  // the clock: every frame while playing when something on the picture moves by itself (logo, slow zoom, fade,
+  // progress bar), so it moves smoothly; else 20 times a second, which is enough for the subtitles
+  const moving = useRef(false);
+  moving.current = (look.logo.enabled && !!logoUrl) || look.fx.zoom === "slow" || look.fx.fade || look.fx.progress;
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    let raf = 0, last = 0;
+    let raf = 0, last = 0, drawn = 0;
     const step = () => {
       const cut = !v.paused && cutAt(cutsRef.current, v.currentTime);
       if (cut) v.currentTime = Math.min(cut.to, v.duration || cut.to);
       const now = v.currentTime;
-      setT(now);
+      if (v.paused || moving.current || performance.now() - drawn > 50) { drawn = performance.now(); setT(now); }
       const b = blurRef.current;
       if (b) { if (Math.abs(b.currentTime - now) > 0.3) b.currentTime = now; if (v.paused !== b.paused) v.paused ? b.pause() : b.play().catch(() => {}); }
       if (performance.now() - last > 66) { last = performance.now(); onTime(now); }
@@ -99,7 +104,9 @@ export function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUr
   const zoom = zoomAt(fx.zoom, t, punch);
   const inCut = cutAt(edit.cuts, t);
   // karaoke: the word being said at t, its time shared out over the line as the export does
-  const words = s.karaoke && line?.km && i >= 0 && segs ? timeWords(line.km, segs[i].start, segs[i].end) : null;
+  // (cut into words once per line, not on every frame)
+  const words = useMemo(() => (s.karaoke && segs && i >= 0 && segs[i].km ? timeWords(segs[i].km, segs[i].start, segs[i].end) : null),
+    [s.karaoke, segs, i]);
   const lit = words ? Math.max(0, words.findIndex((w) => t < w.to)) : -1;
 
   /** Dragging a sticker on the picture moves it (x / y in % of the picture, as the export places it). */
@@ -219,4 +226,4 @@ export function Player({ src, finalSrc, view, onView, look, onLook, segs, logoUr
       </div>
     </div>
   );
-}
+});

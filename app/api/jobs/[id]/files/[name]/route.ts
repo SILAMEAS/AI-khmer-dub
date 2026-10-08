@@ -1,6 +1,7 @@
 import { fs, path } from "@/lib/rt";
 import { VOICES_DIR } from "@/lib/clone";
 import { jobDir, jobs } from "@/lib/jobs";
+import { fileStream } from "@/lib/limits"; // stops quietly when the player cancels a range request
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,6 +50,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     headers["Content-Disposition"] =
       `attachment; filename="download${path.extname(name)}"; filename*=UTF-8''${encodeURIComponent(stem + suffix)}`;
   }
+  if (size === 0) return new Response(null, { status: 200, headers: { ...headers, "Content-Length": "0" } });
   const m = /bytes=(\d*)-(\d*)/.exec(req.headers.get("range") || "");
   let start = 0, end = size - 1, status = 200;
   if (m && (m[1] || m[2])) {
@@ -62,24 +64,3 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   return new Response(fileStream(file, start, end), { status, headers });
 }
 
-/**
- * File bytes as a web stream that stops quietly when the browser cancels. Video players cancel range
- * requests all the time; Readable.toWeb then throws "Controller is already closed" and takes the server down.
- */
-function fileStream(file: string, start: number, end: number): ReadableStream<Uint8Array> {
-  const src = fs.createReadStream(file, { start, end });
-  let done = false;
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      src.on("data", (chunk) => {
-        if (done) return;
-        controller.enqueue(new Uint8Array(chunk as Buffer));
-        if ((controller.desiredSize ?? 1) <= 0) src.pause(); // let the browser catch up
-      });
-      src.on("end", () => { if (!done) { done = true; controller.close(); } });
-      src.on("error", (e) => { if (!done) { done = true; controller.error(e); } });
-    },
-    pull() { src.resume(); },
-    cancel() { done = true; src.destroy(); },
-  });
-}

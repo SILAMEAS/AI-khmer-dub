@@ -1,6 +1,35 @@
 # Khmer AI Dubber: installs whatever is missing, then starts the app at http://127.0.0.1:5000
 # Use start.cmd (it runs this script even where PowerShell scripts are blocked).
-Set-Location $PSScriptRoot
+# (-LiteralPath everywhere: a folder name with [ ] in it would otherwise be read as a wildcard)
+Set-Location -LiteralPath $PSScriptRoot
+# Options typed after start.cmd (e.g. start.cmd --no-clone) are passed on to setup
+$extraArgs = @($args)
+# older Windows 10 / .NET may not offer TLS 1.2 by default, which nodejs.org requires
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# The programs it downloads are made for x64 PCs. Windows 11 on ARM runs them (emulated); Windows 10 on ARM can't.
+$arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($arch -eq "x86") { Stop-WithMessage "This is a 32-bit Windows - the app needs 64-bit Windows 10 or 11." }
+if ($arch -eq "ARM64" -and [Environment]::OSVersion.Version.Build -lt 22000) {
+  Stop-WithMessage "This PC has an ARM processor with Windows 10, which cannot run the app's programs (they are made for x64 PCs). Windows 11 on ARM can: update to Windows 11, or use another PC."
+}
+
+# Behind a company or school proxy nothing gets out directly. Windows knows the proxy (also one set by an
+# automatic "PAC" script); npm, pip, yt-dlp, setup and the app take it from HTTPS_PROXY. One set already is kept.
+if (-not $env:HTTPS_PROXY) {
+  try {
+    $probe = [Uri]"https://registry.npmjs.org/"
+    $p = [Net.WebRequest]::GetSystemWebProxy().GetProxy($probe)
+    if ($p -and $p.Authority -ne $probe.Authority) {
+      $env:HTTPS_PROXY = "http://$($p.Authority)"; $env:HTTP_PROXY = $env:HTTPS_PROXY
+      Write-Host "Using this PC's proxy: $($p.Authority)"
+    }
+  } catch { }
+}
+if ($env:HTTPS_PROXY -or $env:HTTP_PROXY) {
+  $env:NO_PROXY = (@("127.0.0.1", "localhost", $env:NO_PROXY) | Where-Object { $_ }) -join ","  # the app itself: never through it
+  $env:NODE_USE_ENV_PROXY = "1"  # Node.js 22.21+ / 24: its fetch() follows HTTPS_PROXY by itself
+}
 
 function Stop-WithMessage($msg) {
   Write-Host "`n$msg" -ForegroundColor Red
@@ -26,7 +55,7 @@ function Test-NodeOk {
   return $v -ge [version]"20.9"
 }
 $pcNodeOk = Test-NodeOk  # the PC's own Node.js, checked before the portable one is put first
-if (-not $pcNodeOk -and (Test-Path (Join-Path $ownNode "node.exe"))) { $env:Path = "$ownNode;$env:Path" }
+if (-not $pcNodeOk -and (Test-Path -LiteralPath (Join-Path $ownNode "node.exe"))) { $env:Path = "$ownNode;$env:Path" }
 
 # Already running (e.g. start.cmd double-clicked twice)? Just show it.
 try {
@@ -37,9 +66,9 @@ try {
 } catch { }
 
 # The PC's own Node.js is new enough (e.g. updated since): the portable copy is a duplicate
-if ($pcNodeOk -and (Test-Path $ownNode)) {
+if ($pcNodeOk -and (Test-Path -LiteralPath $ownNode)) {
   Write-Host "Removing the portable Node.js in bin\node - the one on this PC is new enough."
-  Remove-Item -Recurse -Force $ownNode -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $ownNode -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # 1. Node.js: the one on the PC if it is new enough, or else a portable one downloaded into bin\node
@@ -48,7 +77,7 @@ if (-not (Test-NodeOk)) {
   if (Get-Command node -ErrorAction SilentlyContinue) {
     Write-Host "The Node.js on this PC ($(& node -v)) is too old - using a portable one instead (your own stays as it is)."
   }
-  Remove-Item -Recurse -Force $ownNode -ErrorAction SilentlyContinue  # an old or broken portable one
+  Remove-Item -LiteralPath $ownNode -Recurse -Force -ErrorAction SilentlyContinue  # an old or broken portable one
   Write-Host "Downloading Node.js LTS into bin\node..."
   try {
     $ProgressPreference = "SilentlyContinue" # Windows PowerShell's progress bar makes downloads very slow
@@ -57,11 +86,14 @@ if (-not (Test-NodeOk)) {
     $zip = Join-Path $tmp "node.zip"
     Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$lts/node-$lts-win-x64.zip" -OutFile $zip
     $unpacked = Join-Path $tmp "node-unpacked"
-    Remove-Item -Recurse -Force $unpacked -ErrorAction SilentlyContinue  # left from an interrupted try
-    & "$env:SystemRoot\System32\tar.exe" -xf $zip -C (New-Item -ItemType Directory -Force $unpacked).FullName
+    Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue  # left from an interrupted try
+    New-Item -ItemType Directory -Force $unpacked | Out-Null
+    $tar = "$env:SystemRoot\System32\tar.exe"
+    if (Test-Path -LiteralPath $tar) { & $tar -xf $zip -C $unpacked }  # fast
+    else { Expand-Archive -LiteralPath $zip -DestinationPath $unpacked -Force }  # Windows 10 before 1803 has no tar
     New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "bin") | Out-Null
-    Move-Item (Get-ChildItem $unpacked -Directory | Select-Object -First 1).FullName $ownNode
-    Remove-Item -Recurse -Force $unpacked, $zip
+    Move-Item -LiteralPath (Get-ChildItem -LiteralPath $unpacked -Directory | Select-Object -First 1).FullName -Destination $ownNode
+    Remove-Item -LiteralPath $unpacked, $zip -Recurse -Force
     $env:Path = "$ownNode;$env:Path"
   } catch { }
   if (-not (Test-NodeOk)) {
@@ -79,10 +111,11 @@ $fingerprint = (@("scripts\setup.mjs", "package-lock.json") | ForEach-Object {
   -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString("X2") })
 }) -join ""
 $done = $null
-if (Test-Path $marker) { $done = Get-Content $marker -Raw | ConvertFrom-Json }
-if (-not $done -or $done.fingerprint -ne $fingerprint) {
+if (Test-Path -LiteralPath $marker) { try { $done = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json } catch { } }
+if (-not $done -or $done.fingerprint -ne $fingerprint -or $extraArgs.Count) {
   $setupArgs = @()
   if ($done -and $done.args) { $setupArgs = @($done.args) }  # keep earlier choices such as --no-clone
+  $setupArgs = @($setupArgs + $extraArgs | Select-Object -Unique)
   Write-Host "Setting up (the first time this downloads ~9 GB and takes 15-30 minutes)...`n"
   npm run setup -- @setupArgs
   if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Setup did not finish - see the message above, then run start.cmd again." }
@@ -90,9 +123,9 @@ if (-not $done -or $done.fingerprint -ne $fingerprint) {
 
 # 3. Build when the code changed since the last build
 $build = ".next\BUILD_ID"
-$newest = Get-ChildItem app, lib, next.config.ts, package.json, tsconfig.json -Recurse -File |
+$newest = Get-ChildItem -LiteralPath app, lib, proxy.ts, next.config.ts, package.json, tsconfig.json -Recurse -File |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not (Test-Path $build) -or $newest.LastWriteTime -gt (Get-Item $build).LastWriteTime) {
+if (-not (Test-Path -LiteralPath $build) -or $newest.LastWriteTime -gt (Get-Item -LiteralPath $build).LastWriteTime) {
   npm run build
   if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Build failed - see the message above." }
 }

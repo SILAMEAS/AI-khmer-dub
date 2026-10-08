@@ -27,6 +27,18 @@ function findExe(name: string): string {
   return hit;
 }
 
+let acp: Promise<number> | undefined;
+/**
+ * The Windows "ANSI" code page. whisper.cpp's programs read their command line in it, so any text outside it
+ * (Khmer, or Chinese on a non-Chinese Windows) reaches them as "???". 0 when unknown or not Windows.
+ */
+export function ansiCodePage(): Promise<number> {
+  if (process.platform !== "win32") return Promise.resolve(0);
+  acp ??= run("reg", ["query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage", "/v", "ACP"])
+    .then((b) => Number(/ACP\s+REG_SZ\s+(\d+)/.exec(b.toString())?.[1]) || 0, () => 0);
+  return acp;
+}
+
 let cache: Record<string, string> = {};
 export function tool(name: "ffmpeg" | "ffprobe" | "yt-dlp" | "whisper-cli"): string {
   if (cache[name]) return cache[name];

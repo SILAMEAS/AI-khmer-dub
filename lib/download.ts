@@ -157,12 +157,17 @@ type Info = { title?: string; duration?: number; extractor_key?: string; extract
 
 const hostOf = (url: string) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "the site"; } };
 
+/** Ends a download that was stopped on purpose (cancel, an evicted paste-time download) instead of retrying it. */
+function stopped(signal?: AbortSignal) {
+  if (signal?.aborted) throw Object.assign(new Error("The download was stopped"), { raw: "STOPPED" });
+}
+
 /**
  * Asks the site once what the link holds (title, formats, subtitles). The downloads then use this answer
  * (--load-info-json) instead of asking again: on a slow network, asking is often the slowest part.
  * When YouTube wants a login, a browser's login is tried; the one that worked is returned for the downloads.
  */
-async function readInfo(url: string, net: NetworkSettings, report: Report | undefined, quick: boolean) {
+async function readInfo(url: string, net: NetworkSettings, report: Report | undefined, quick: boolean, signal?: AbortSignal) {
   const host = hostOf(url);
   const look = async (browser?: string): Promise<{ json?: string; err?: string; browser?: string }> => {
     let out = "";
@@ -170,6 +175,7 @@ async function readInfo(url: string, net: NetworkSettings, report: Report | unde
       const args = [url, ...baseArgs(net, browser), "--skip-download", "-J"];
       if (quick) args.push("--retries", "3", "--extractor-retries", "2"); // later options win
       const json = await run(tool("yt-dlp"), args, {
+        signal,
         idleTimeout: (quick ? 2 : 5) * 60_000, // nothing at all for minutes: the network is not letting it through
         onLine: (l) => {
           if (l.startsWith("{")) return; // the answer itself
@@ -184,13 +190,16 @@ async function readInfo(url: string, net: NetworkSettings, report: Report | unde
   };
   report?.("download", 0, `Connecting to ${host}`);
   let r = await look();
+  stopped(signal);
   if (r.err && needsLogin(r.err)) {
     for (const b of loginBrowsers(net)) {
+      stopped(signal);
       report?.("download", 0, `${host} asks for a login - trying your ${b} login`);
       const again = await look(b);
       if (again.json || !loginUnusable(again.err!)) { r = again; break; } // read but did not help: stop here
     }
   }
+  stopped(signal);
   if (!r.json) throw new Error(explain(r.err!, url, net));
   const info = JSON.parse(r.json) as Info;
   if (info._type === "playlist") throw new Error("This is a playlist or channel link - open one video and copy its link.");
@@ -232,6 +241,14 @@ export type Downloaded = {
   video: Promise<string>;
   /** show the picture's download progress again (it goes on quietly while the sound is worked on) */
   watch: () => void;
+  /**
+   * Stops what is still coming down (the picture, and joining it to the sound) and resolves once yt-dlp, aria2c and
+   * ffmpeg have exited, so the job folder can be deleted or the job tried again without two downloads writing the
+   * same files. `video` then rejects. Unfinished pieces (.part, .aria2, a half-joined input.mp4) are deleted, unless
+   * keepPartials: a retry then goes on where it stopped. Finished files (the sound, a whole picture) stay. Safe to
+   * call more than once, and after the download finished (then it only waits).
+   */
+  cancel: (opts?: { keepPartials?: boolean }) => Promise<void>;
 };
 
 /**
@@ -243,9 +260,56 @@ export type Downloaded = {
  * A download stopped half-way goes on where it stopped.
  */
 export async function download(url: string, jd: string, report: Report, maxRes = 1080): Promise<Downloaded> {
-  const pre = takePrefetch(url);
-  if (pre) await adopt(pre, jd, report); // the sound may already be here: it started when the link was pasted
-  return fetchLink(url, jd, report, maxRes, false) as Promise<Downloaded>;
+  const stop = new AbortController();
+  const end = markActive(jd);
+  try {
+    const pre = takePrefetch(url);
+    if (pre) await adopt(pre, jd, report); // the sound may already be here: it started when the link was pasted
+    const d = await fetchLink(url, jd, report, maxRes, false, undefined, stop.signal) as Omit<Downloaded, "cancel">;
+    d.video.then(end, end); // the picture goes on after this returns: the job is "downloading" until it is in
+    const cancel = async ({ keepPartials = false } = {}) => {
+      if (!stop.signal.aborted) stop.abort("download cancelled");
+      const failed = await d.video.then(() => false, () => true); // settles once every program has exited
+      if (!keepPartials) await dropUnfinished(jd, failed);
+    };
+    return { ...d, cancel };
+  } catch (e) { end(); throw e; }
+}
+
+// Job folders with a download still running (the picture goes on after download() returns, also when the job
+// failed meanwhile): retrying or deleting such a job must wait, or two downloads write the same files.
+const ga = globalThis as unknown as { __khmerDownloads?: Map<string, number> };
+const active = (ga.__khmerDownloads ??= new Map());
+const key = (jd: string) => path.resolve(jd).toLowerCase();
+
+function markActive(jd: string): () => void {
+  const k = key(jd);
+  active.set(k, (active.get(k) ?? 0) + 1);
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    const n = (active.get(k) ?? 1) - 1;
+    if (n > 0) active.set(k, n); else active.delete(k);
+  };
+}
+
+/** Whether a link download into this job folder is still running (also its picture after the job failed). */
+export const downloadActive = (jd: string) => active.has(key(jd));
+
+/** Unfinished download pieces in a job folder; also input.mp4 when joining picture and sound was cut short. */
+async function dropUnfinished(jd: string, joinFailed: boolean) {
+  let names: string[];
+  try { names = await fsp.readdir(jd); } catch { return; } // the folder is gone already
+  const aria = new Set(names.filter((n) => n.endsWith(".aria2")).map((n) => n.slice(0, -6))); // aria2c's file has gaps
+  // the picture is deleted only once it is joined: still here means input.mp4 is half written
+  const unjoined = joinFailed && names.some((n) => /^picture\.(mp4|webm|mkv)$/i.test(n));
+  for (const n of names) {
+    const piece = /^(picture|sound|input)\./.test(n) && (/\.(part|aria2|ytdl)$|\.part-Frag|\.temp\.\w+$/.test(n) || aria.has(n));
+    if (piece || (unjoined && n === "input.mp4")) {
+      await fsp.rm(path.join(jd, n), { force: true }).catch(() => {});
+    }
+  }
 }
 
 /** What a site answers to an expired download address (yt-dlp, aria2c). */
@@ -258,7 +322,11 @@ const INFO_TTL = 4 * 3600_000; // the site's download addresses stop working aft
 const SOUND_FILE = /^sound\.(m4a|webm|mp4|opus|ogg|aac|mp3)$/i, WHOLE_FILE = /^input\.(mp4|mkv|webm|mov)$/i;
 
 async function fetchLink(url: string, jd: string, report: Report, maxRes: number, soundOnly: boolean,
-                         onInfo?: (info: Info) => void): Promise<Downloaded | void> {
+                         onInfo?: (info: Info) => void, signal?: AbortSignal): Promise<Omit<Downloaded, "cancel"> | void> {
+  // every program below stops with `signal`; also with `own` alone, to stop the picture when the sound failed
+  const own = new AbortController();
+  const follow = () => own.abort(signal?.reason);
+  if (signal?.aborted) follow(); else signal?.addEventListener("abort", follow, { once: true });
   const net = networkSettings();
   await updateYtDlp(report);
   const captions = path.join(jd, CAPTIONS_DIR);
@@ -273,7 +341,7 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
   let refreshing: Promise<void> | undefined;
   const refresh = () => (refreshing ??= (async () => {
     let json: string;
-    ({ info, json, browser } = await readInfo(url, net, report, false));
+    ({ info, json, browser } = await readInfo(url, net, report, false, own.signal));
     await fsp.writeFile(infoFile, json, "utf8");
     await fsp.writeFile(loginFile, browser ?? "", "utf8");
   })().finally(() => { refreshing = undefined; }));
@@ -333,6 +401,9 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
     // "403 Forbidden" over and over: the addresses expired, and retrying them is no use - stop, renew, go on.
     // Nothing coming in for minutes: the same (aria2c keeps printing "DL:0B" then, so the idle timeout never fires)
     const stop = new AbortController();
+    const halt = () => stop.abort(own.signal.reason); // cancelled from outside: the same as stopping it here
+    stopped(own.signal);
+    own.signal.addEventListener("abort", halt, { once: true });
     try {
       await run(tool("yt-dlp"), [
         "--load-info-json", infoFile, ...baseArgs(net, browser), ...fastArgs(safe), "--progress",
@@ -369,6 +440,8 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
         },
       });
     } catch (e) { out += "\n" + (e as Error).message; }
+    finally { own.signal.removeEventListener("abort", halt); }
+    stopped(own.signal);
     if (stalled) throw Object.assign(new Error(explain(out, url, net)), { raw: "STALLED\n" + out });
     if (!file || !fs.existsSync(file)) { // the printed path can be missing on some sites: look for the file itself
       const f = fs.readdirSync(jd).find((n) => wanted.test(n));
@@ -392,6 +465,7 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
     for (let attempt = 0; ; attempt++) {
       try { return await fetchOnce(part, args, name, wanted, safe); } catch (e) {
         const raw = (e as { raw?: string }).raw ?? "";
+        if (raw === "STOPPED") throw e; // stopped on purpose: no retry
         if (raw.startsWith("STALLED")) { // a long download may stall a few times: its own count
           if (++stalls > 5) throw e;
           attempt--;
@@ -435,8 +509,15 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
   }
   const picture = fetchPart("picture", ["-f", "bv*", "-S", `${res},ext:mp4`], "picture", /^picture\.(mp4|webm|mkv)$/i);
   picture.catch(() => {}); // awaited below; a failure is reported then
-  const sound = await fetchPart("sound", [...subs, "-f", "ba", "-S", "ext:m4a"], "sound", SOUND_FILE);
-  await moveSubs(jd, captions);
+  let sound: string;
+  try {
+    sound = await fetchPart("sound", [...subs, "-f", "ba", "-S", "ext:m4a"], "sound", SOUND_FILE);
+    await moveSubs(jd, captions);
+  } catch (e) { // no sound, no job: the picture must not go on downloading into the folder unseen
+    own.abort("the sound download failed");
+    await picture.catch(() => {});
+    throw e;
+  }
   watching = false; // the caller works on the sound now; the picture goes on quietly
   const video = picture.then(async (pic) => {
     if (watching) report("download", 1, "Putting picture and sound together");
@@ -444,9 +525,10 @@ async function fetchLink(url: string, jd: string, report: Report, maxRes: number
     // no +faststart: it writes the whole file a second time (3 GB more), and the player seeks with ranges anyway;
     // output.mp4 gets it at export
     const merge = (audio: string[]) => run(tool("ffmpeg"), ["-y", "-v", "error", "-i", pic, "-i", sound,
-      "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, out]);
+      "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, out], { signal: own.signal });
     // the sound as it is; re-encoded only when mp4 can't hold it (rare)
-    await merge(["-c:a", "copy"]).catch(() => merge(["-c:a", "aac", "-b:a", "192k"]));
+    stopped(own.signal);
+    await merge(["-c:a", "copy"]).catch(() => { stopped(own.signal); return merge(["-c:a", "aac", "-b:a", "192k"]); });
     await fsp.rm(pic, { force: true });
     return out;
   });
@@ -472,24 +554,49 @@ export type Prefetch = {
   title?: string; duration?: number; site?: string;
   progress: number; message: string; ready: boolean; error?: string;
   forward?: Report; // the job that took it over shows its progress
+  stop: AbortController; // stops it when it is let go (replaced, too many, never started)
+  taken?: boolean; // a job took it over: its folder is the job's to move, not ours to delete
 };
 const PREFETCH_DIR = path.join(JOBS_DIR, "_prefetch");
 const PREFETCH_KEEP = 2 * 3600_000;
+// links pasted and never started each keep a yt-dlp running: a few at most, the oldest is let go
+const PREFETCH_MAX = 3;
 const g = globalThis as unknown as { __khmerPrefetch?: Map<string, Prefetch> };
 const prefetches = (g.__khmerPrefetch ??= (() => {
-  fs.rmSync(PREFETCH_DIR, { recursive: true, force: true }); // left from before a restart
+  // left from before a restart; a locked file (open in Explorer) must not stop the app from starting
+  try { fs.rmSync(PREFETCH_DIR, { recursive: true, force: true }); } catch (e) { console.error("Could not clear jobs/_prefetch", e); }
   return new Map<string, Prefetch>();
 })());
+
+/**
+ * Lets a paste-time download go: out of the list, its programs stopped, and its folder deleted once they have
+ * exited. Every way an entry ends (replaced after an error, too many, never started) comes through here, so no
+ * folder is left in jobs/_prefetch until the next restart.
+ */
+function dropPrefetch(entry: Prefetch) {
+  if (prefetches.get(entry.url) === entry) prefetches.delete(entry.url);
+  if (entry.taken) return;
+  entry.stop.abort("let go");
+  entry.done.finally(() => {
+    if (!entry.taken) fs.rm(entry.dir, { recursive: true, force: true, maxRetries: 3 }, () => {});
+  });
+}
 
 /** Starts (or finds) the download of a pasted link; resolves once the site has said what the link is. */
 export async function startPrefetch(url: string, maxRes = 1080): Promise<Prefetch> {
   let p = prefetches.get(url);
   if (!p || p.error) {
+    if (p) dropPrefetch(p); // failed before: its folder goes, a new try starts
+    for (const old of prefetches.values()) { // oldest first (a Map keeps the order they were added)
+      if (prefetches.size < PREFETCH_MAX) break;
+      dropPrefetch(old);
+    }
     const dir = path.join(PREFETCH_DIR, Math.random().toString(36).slice(2, 10));
     fs.mkdirSync(dir, { recursive: true });
     let infoReady!: () => void;
     const info = new Promise<void>((r) => (infoReady = r));
-    const entry: Prefetch = { url, dir, done: Promise.resolve(), progress: 0, message: "Starting", ready: false };
+    const entry: Prefetch = { url, dir, done: Promise.resolve(), progress: 0, message: "Starting", ready: false,
+      stop: new AbortController() };
     const report: Report = (stage, frac, message) => {
       Object.assign(entry, { progress: frac, message });
       entry.forward?.(stage, frac, `${message} (started when the link was pasted)`);
@@ -498,15 +605,11 @@ export async function startPrefetch(url: string, maxRes = 1080): Promise<Prefetc
       Object.assign(entry, { title: String(i.title ?? "video"), duration: Number(i.duration) || 0,
         site: String(i.extractor_key ?? i.extractor ?? "") });
       infoReady();
-    }).then(() => { Object.assign(entry, { ready: true, progress: 1, message: "Sound downloaded - ready to start" }); },
+    }, entry.stop.signal).then(() => { Object.assign(entry, { ready: true, progress: 1, message: "Sound downloaded - ready to start" }); },
       (e) => { entry.error = (e as Error).message; });
     entry.done.finally(infoReady);
     prefetches.set(url, (p = entry));
-    setTimeout(() => { // never started: let it go
-      if (prefetches.get(url) !== entry) return;
-      prefetches.delete(url);
-      entry.done.finally(() => fs.rmSync(dir, { recursive: true, force: true }));
-    }, PREFETCH_KEEP).unref?.();
+    setTimeout(() => dropPrefetch(entry), PREFETCH_KEEP).unref?.(); // never started: let it go
     await info;
   } else await Promise.race([p.done, new Promise((r) => setTimeout(r, 100))]);
   return p;
@@ -517,7 +620,7 @@ export const prefetchStatus = (url: string) => prefetches.get(url);
 /** The paste-time download of this link, for the job that now starts (each one is taken once). */
 function takePrefetch(url: string): Prefetch | undefined {
   const p = prefetches.get(url);
-  if (p) prefetches.delete(url);
+  if (p) { prefetches.delete(url); p.taken = true; }
   return p;
 }
 

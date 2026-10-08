@@ -2,13 +2,13 @@
  * Khmer dubbing pipeline: download -> transcribe -> translate -> TTS -> mix -> mux.
  * Audio is streamed through ffmpeg in chunks, so a 2-hour movie needs little RAM.
  */
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
 import { Readable, Transform, type TransformCallback } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fs, fsp, path } from "./rt";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
-import { BIN, MODELS_DIR, SR, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
+import { BIN, MODELS_DIR, SR, ansiCodePage, decodeMono, hasFilter, probeDuration, probeSize, run, tool } from "./tools";
 import { analyzeLines, median } from "./voice";
 import {
   CRF, FONTS_DIR, applyGlossary, clipFile, loadGlossary, logoFile, musicFile, outSize, parseFx, parseLogo, parseOut,
@@ -22,6 +22,7 @@ import {
 import { timeWords } from "./words";
 import { findCaptions } from "./captions";
 import { download, reusableInput } from "./download";
+import { ttsAgent } from "./net";
 import { BACKGROUND, VOCALS, cloneAvailable, convertVoices, findSpeakers, separate, speakerSample, stemsReady } from "./clone";
 
 export const VOICES = { male: "km-KH-PisethNeural", female: "km-KH-SreymomNeural" } as const;
@@ -31,8 +32,8 @@ export type VoiceChoice = Voice | "auto" | "clone";
 export const defaultVoice = (): VoiceChoice => "auto"; // fastest; voice cloning is picked by hand
 /** Why a requested voice can't be used, or null when it can. */
 export function voiceError(v: string): string | null {
-  if (v === "clone") return cloneAvailable() ? null : "Voice cloning is not installed - run: npm run setup -- --clone";
-  return v in VOICES || v === "auto" ? null : "voice must be clone, auto, male or female";
+  if (v === "clone") return cloneAvailable() ? null : "Voice cloning is not installed - close the app and run start.cmd again (setup installs it)";
+  return Object.hasOwn(VOICES, v) || v === "auto" ? null : "voice must be clone, auto, male or female";
 }
 // Natural pitch of each Khmer voice (Hz) and how far it moves per Hz of SSML pitch offset,
 // measured from the voices themselves. Used to bring the dub close to the original speaker.
@@ -265,7 +266,10 @@ async function speechStretches(wav: string): Promise<[number, number][]> {
   const exe = path.join(BIN, "whisper", "Release", `whisper-vad-speech-segments${process.platform === "win32" ? ".exe" : ""}`);
   const vad = path.join(MODELS_DIR, VAD_MODEL);
   if (!fs.existsSync(exe) || !fs.existsSync(vad)) return [];
-  const out = (await run(exe, ["-np", "-vm", vad, "-f", wav, "-vsd", "300", "-vp", "150", "-t", "8"])).toString();
+  // relative paths from the wav's folder: see whisper() in transcribe (a Khmer folder name would reach it as "???")
+  const cwd = path.dirname(wav);
+  const out = (await run(exe, ["-np", "-vm", path.relative(cwd, vad), "-f", path.basename(wav), "-vsd", "300", "-vp", "150",
+    "-t", "8"], { cwd })).toString();
   const raw = [...out.matchAll(/start = ([\d.]+), end = ([\d.]+)/g)].map((m) => [+m[1] / 100, +m[2] / 100] as [number, number]);
   const merged: [number, number][] = [];
   for (const [x, y] of raw) {
@@ -396,12 +400,17 @@ async function transcribe(wav: string, jd: string, lang: string, quality: string
   const base = path.join(jd, "whisper");
 
   const whisper = async (file: string, language: string, label: string): Promise<WhisperJson> => {
-    const args = ["-m", model, "-f", file, "-l", language === "auto" ? "auto" : language,
+    // whisper-cli reads its command line in Windows' ANSI code page: a folder named in Khmer would reach it as
+    // "???". Run in the job folder with relative paths (plain ASCII wherever the app is installed).
+    const rel = (p: string) => path.relative(jd, p);
+    const args = ["-m", rel(model), "-f", rel(file), "-l", language === "auto" ? "auto" : language,
       "-t", String(Math.min(os.cpus().length, 16)), "-mc", "0", "-bs", "5", // 16 threads: fastest in our tests
-      "-ojf", "-of", base, "-pp"]; // full JSON: the time of every word
-    if (language === "zh") args.push("--prompt", "以下是普通话的句子。"); // nudges simplified Chinese + punctuation
+      "-ojf", "-of", rel(base), "-pp"]; // full JSON: the time of every word
+    // nudges simplified Chinese + punctuation; only a Chinese Windows passes it on intact (others send "???")
+    if (language === "zh" && [936, 950].includes(await ansiCodePage())) args.push("--prompt", "以下是普通话的句子。");
     report("transcribe", 0, label);
     await run(tool("whisper-cli"), args, {
+      cwd: jd,
       onLine: (l) => {
         const m = l.match(/progress\s*=\s*(\d+)%/);
         if (m) report("transcribe", +m[1] / 100, `${label} ${m[1]}%${also}`);
@@ -517,14 +526,26 @@ const ENDPOINTS = [
   },
 ];
 
-async function googleTranslate(text: string, src: string): Promise<string> {
-  let lastErr: unknown;
+/** Text that has words but no Khmer letter: the translator handed it back as it was. */
+const notKhmer = (s: string) => !/[ក-៿]/.test(s) && /\p{L}/u.test(s);
+
+/**
+ * strict: a single line that comes back without any Khmer counts as failed and the other endpoint is tried
+ * (the translator sometimes hands a few lines of a batch back untranslated; Khmer voices cannot say them).
+ */
+async function googleTranslate(text: string, src: string, strict = false): Promise<string> {
+  let lastErr: unknown, lastOut = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     for (const call of ENDPOINTS) {
-      try { return (await call(text, src)).trim(); } catch (e) { lastErr = e; }
+      try {
+        const out = (await call(text, src)).trim();
+        if (!strict || !notKhmer(out)) return out;
+        lastOut = out; lastErr = new Error("came back untranslated");
+      } catch (e) { lastErr = e; }
     }
     await sleep(1500 * (attempt + 1));
   }
+  if (lastOut) return lastOut; // kept as it is; translate() reports which lines
   throw new Error(`Translation failed: ${lastErr instanceof Error ? lastErr.message : lastErr}`);
 }
 
@@ -544,12 +565,26 @@ async function translate(segs: Segment[], srcLang: string, report: Report) {
   });
   if (cur.length) chunks.push(cur);
 
+  /**
+   * Lines that came back as a different number of lines (the translator merged or split one): each half once more,
+   * down to single lines only where needed. One request per line for the whole chunk (~100 in a row) would get the
+   * app rate-limited (HTTP 429), and the job failed after the long speech recognition.
+   */
+  const put = async (idx: number[]): Promise<void> => {
+    if (idx.length === 1) { segs[idx[0]].km = await googleTranslate(source(segs[idx[0]]), src, true); return; }
+    const joined = idx.map((i) => source(segs[i])).join("\n");
+    const lines = (await googleTranslate(joined, src)).split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length === idx.length) { idx.forEach((i, k) => (segs[i].km = lines[k])); return; }
+    const half = Math.ceil(idx.length / 2);
+    await put(idx.slice(0, half));
+    await put(idx.slice(half));
+  };
+
   let done = 0;
   for (const chunk of chunks) {
-    const joined = chunk.map((i) => source(segs[i])).join("\n");
-    const lines = (await googleTranslate(joined, src)).split("\n").map((l) => l.trim()).filter(Boolean);
-    if (lines.length === chunk.length) chunk.forEach((i, k) => (segs[i].km = lines[k]));
-    else for (const i of chunk) segs[i].km = await googleTranslate(source(segs[i]), src); // line count drifted
+    await put(chunk);
+    // lines handed back untranslated (no Khmer in them): once more on their own
+    for (const i of chunk) if (notKhmer(segs[i].km)) segs[i].km = await googleTranslate(source(segs[i]), src, true);
     if (glossary.length) for (const i of chunk) segs[i].km = applyGlossary(segs[i].km, glossary);
     done += chunk.length;
     report("translate", done / segs.length, `Translating to Khmer ${done}/${segs.length}`);
@@ -557,9 +592,10 @@ async function translate(segs: Segment[], srcLang: string, report: Report) {
 }
 
 /** Who is speaking each line: pitch and loudness of the original voice, and boy or girl for the dub. */
-function analyzeSpeakers(jd: string, segs: Segment[], report: Report) {
+async function analyzeSpeakers(jd: string, segs: Segment[], report: Report) {
   report("analyze", 0, "Listening to who speaks each line");
-  analyzeLines(path.join(jd, "audio16k.wav"), segs).forEach((v, i) => {
+  (await analyzeLines(path.join(jd, "audio16k.wav"), segs,
+    (f) => report("analyze", f, "Listening to who speaks each line"))).forEach((v, i) => {
     Object.assign(segs[i], { f0: Math.round(v.f0), db: Math.round(v.db * 10) / 10, voice: v.gender });
   });
 }
@@ -580,6 +616,19 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   }
   else src = path.join(jd, opts.inputName!);
 
+  try {
+    return await prepareSound(jd, opts, report, src, title, pending);
+  } catch (e) {
+    // The picture of a link would go on downloading into the job folder while the job shows the error, and a retry
+    // or delete would then trip over its files: it is stopped, and waited for until every program has exited.
+    // What came down stays, so a retry goes on where it stopped.
+    await pending?.cancel({ keepPartials: true }).catch((err) => console.error(err));
+    throw e;
+  }
+}
+
+async function prepareSound(jd: string, opts: Opts, report: Report, src: string, title: string,
+                            pending: Awaited<ReturnType<typeof download>> | undefined): Promise<Meta> {
   // subtitles the video already has are used as they are: nothing to listen to (much faster than Whisper)
   if (!editOnly(opts)) report("transcribe", 0, "Looking for subtitles in the video");
   const captions = editOnly(opts) ? null : await findCaptions(src, jd, opts.sourceLang, opts.trim)
@@ -589,8 +638,11 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   if (opts.trim) src = pending?.soundOnly ? await cutSound(jd, src, opts.trim) : await cut(jd, src, opts.trim, report);
 
   report("extract", 0, "Extracting audio");
+  // a silent video can still be edited (cuts, effects, music); only a dub needs something to listen to
+  const sound = await hasAudio(src);
+  if (!sound && !editOnly(opts)) throw new Error("This video has no sound track - there is nothing to listen to or dub");
   const wav = path.join(jd, "audio16k.wav");
-  await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
+  if (sound) await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", src, "-vn", "-ac", "1", "-ar", "16000", wav]);
   const duration = await probeDuration(src);
   /** A link's picture, once it has come down (it went on downloading while the sound was worked on). */
   const picture = async (meta: Meta) => {
@@ -625,7 +677,7 @@ export async function prepare(jd: string, opts: Opts, report: Report): Promise<M
   };
   const segs = glue(opts.voice === "clone" ? await splitBySpeaker(jd, lines, meta, report) : lines);
   meta.segments = segs.length;
-  analyzeSpeakers(jd, segs, report);
+  await analyzeSpeakers(jd, segs, report);
   await translate(segs, language, report);
   saveSegments(jd, segs);
   writeSrt(path.join(jd, "original.srt"), segs.map((s) => [s.start, s.end, s.text]));
@@ -708,15 +760,26 @@ async function assignSpeakers(jd: string, segs: Segment[], meta: Meta, report: R
 
 const signed = (n: number, unit: string) => `${n >= 0 ? "+" : ""}${n}${unit}`;
 
+/**
+ * A connection that drops halfway (Wi-Fi, sleep) never ends the stream: after 60 s it counts as failed, and the
+ * caller reconnects and tries again (a line takes a few seconds normally).
+ */
 async function synth(tts: MsEdgeTTS, text: string, rate: number, pitch = 0): Promise<Buffer> {
   const { audioStream } = tts.toStream(text, { rate: signed(rate, "%"), pitch: signed(pitch, "Hz") });
   const parts: Buffer[] = [];
-  for await (const c of audioStream) parts.push(c as Buffer);
+  const read = (async () => { for await (const c of audioStream) parts.push(c as Buffer); })();
+  read.catch(() => {}); // after a timeout it may still fail; that is no longer anyone's concern
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([read, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("The Khmer voice did not answer")), 60_000);
+    })]);
+  } finally { clearTimeout(timer); }
   return Buffer.concat(parts);
 }
 
 async function newTts(voice: Voice): Promise<MsEdgeTTS> {
-  const tts = new MsEdgeTTS();
+  const tts = new MsEdgeTTS({ agent: ttsAgent() }); // behind a proxy: through it (lib/net.ts)
   await tts.setMetadata(VOICES[voice], OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
   return tts;
 }
@@ -784,7 +847,10 @@ async function ttsAll(segs: Segment[], opts: Opts, duration: number, dir: string
         await fsp.writeFile(file, mp3);
         // Too long for its slot: ask the voice to speak faster, which sounds far more natural
         // than speeding the audio up afterwards. Whatever is left over is stretched in placeClips.
-        const spoken = trimSilence(await decodeMono(file)).length / SR || mp3.length / MP3_BYTES_PER_SEC;
+        // The mp3's own length (constant bitrate) is the longest the speech can be: when that fits, nothing needs
+        // decoding; only a line that may be too long is decoded to measure the speech without its silent edges.
+        const whole = mp3.length / MP3_BYTES_PER_SEC;
+        const spoken = whole <= slot * 1.05 ? whole : trimSilence(await decodeMono(file)).length / SR || whole;
         if (spoken > slot * 1.05 && opts.rate < MAX_TTS_RATE) {
           const rate = Math.min(MAX_TTS_RATE, Math.ceil((1 + opts.rate / 100) * (spoken / slot) * 100 - 100));
           mp3 = await say(voice, text, rate, pitch);
@@ -826,7 +892,18 @@ function toneFilter(t: Tone, rubberband: boolean): string {
   return f.join(",");
 }
 
-/** Fit each Khmer clip into its slot (speeding it up if needed); saves processed clips as raw f32. */
+/**
+ * What a line's finished clip (tts/<i>.pcm) was made from, kept in tts/clips.json. src: the voice file with its time
+ * and size (a line voiced again gets a new file); n: its length without the silent edges; key: speed-up, level and
+ * stretcher of the finished clip, len its length (samples).
+ */
+type Made = { src: string; n: number; key?: string; len?: number };
+
+/**
+ * Fit each Khmer clip into its slot (speeding it up if needed), with its level and fades. The finished clips stay on
+ * disk as 16-bit sound, so an export decodes only the lines that changed - a 2-hour film otherwise ran thousands of
+ * ffmpeg on every export. That costs ~300 MB per hour of speech (half of the f32 they used to be), removed with the job.
+ */
 async function placeClips(segs: Segment[], dir: string, duration: number, match: boolean, clone: boolean,
                           report: Report): Promise<Clip[]> {
   const clips: Clip[] = [];
@@ -838,23 +915,34 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
   const refDb = median(dbs);
   const fadeIn = Math.round(0.01 * SR), fadeOut = Math.round(0.04 * SR);
 
-  // Every line is decoded (one ffmpeg per line, many in parallel) and kept on disk, not in memory: a 4-hour film has
-  // thousands of lines, hours of sound. Only the lengths stay in memory to place the lines.
+  // A changed line is decoded (one ffmpeg per line, many in parallel) and kept on disk, not in memory: a 4-hour film
+  // has thousands of lines, hours of sound. Only the lengths stay in memory to place the lines.
   const files = segs.map((_, i) => {
     const cloned = path.join(dir, `${i}.vc.wav`);
     return clone && fs.existsSync(cloned) ? cloned : path.join(dir, `${i}.mp3`);
   });
-  const f32 = (i: number) => path.join(dir, `${i}.f32`);
-  const save = (file: string, a: Float32Array) => fsp.writeFile(file, Buffer.from(a.buffer, a.byteOffset, a.byteLength));
+  const book = path.join(dir, "clips.json");
+  let made: Record<number, Made> = {};
+  try { made = JSON.parse(await fsp.readFile(book, "utf8")); } catch { /* none yet (or unreadable): every line is made */ }
+  const ident = (f: string) => {
+    try { const s = fs.statSync(f); return `${path.basename(f)}|${s.mtimeMs}|${s.size}`; } catch { return ""; }
+  };
+  const f32 = (i: number) => path.join(dir, `${i}.f32`); // decoded in this run, until its clip is finished
+  const pcm = (i: number) => path.join(dir, `${i}.pcm`);
+  const decoded = new Set<number>();
+  const save = (file: string, a: Float32Array | Int16Array) => fsp.writeFile(file, Buffer.from(a.buffer, a.byteOffset, a.byteLength));
   const load = async (file: string) => {
     const bytes = await fsp.readFile(file), a = new Float32Array(bytes.length / 4);
     new Uint8Array(a.buffer).set(bytes);
     return a;
   };
   const lengths = await mapLimit(files.map((f, i) => ({ f, i })), DECODE_JOBS, async ({ f, i }) => {
-    if (!fs.existsSync(f)) return 0;
+    const src = ident(f);
+    if (!src) { delete made[i]; return 0; }
+    if (made[i]?.src === src) return made[i].n; // the same voice as last time: its length is known
     const a = trimSilence(await decodeMono(f));
-    if (a.length) await save(f32(i), a);
+    if (a.length) { await save(f32(i), a); decoded.add(i); }
+    made[i] = { src, n: a.length };
     return a.length;
   });
   report("mix", 0.1, "Syncing Khmer voice to the video");
@@ -869,23 +957,30 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
     plan.push({ i, factor });
     at = pos + n / SR / factor + GAP;
   }
+  const size = (f: string) => { try { return fs.statSync(f).size; } catch { return -1; } };
   // each line sped up where needed, then its level and fades (many at once, each written back straight away)
   const final = await mapLimit(plan, DECODE_JOBS, async ({ i, factor }) => {
-    const a = factor > 1 ? trimSilence(await decodeMono(files[i], stretch(factor))) : await load(f32(i));
-    if (!a.length) { await fsp.rm(f32(i), { force: true }); return 0; }
     // follow the original: a shout stays louder than a whisper (half the difference, at most ±6 dB)
     const db = segs[i].db;
     const lift = match && dbs.length && db !== undefined && db > -60 ? Math.max(-6, Math.min(6, (db - refDb) / 2)) : 0;
+    // the clip is made again only when its voice, speed-up or level changed
+    const key = JSON.stringify([factor.toFixed(4), lift.toFixed(2), factor > 1 && rb]);
+    const m = made[i];
+    if (m.key === key && m.len && size(pcm(i)) === m.len * 2) return m.len;
+    const a = factor > 1 ? trimSilence(await decodeMono(files[i], stretch(factor)))
+      : decoded.has(i) ? await load(f32(i)) : trimSilence(await decodeMono(files[i]));
+    Object.assign(m, { key, len: a.length });
+    if (!a.length) return 0;
     let peak = 0, energy = 0;
     for (const v of a) { peak = Math.max(peak, Math.abs(v)); energy += v * v; }
     const rms = Math.sqrt(energy / a.length);
     const k = rms > 0 ? Math.min(10 ** ((VOICE_DB + lift) / 20) / rms, 0.95 / peak) : 1;
-    const out = new Float32Array(a.length);
+    const out = new Int16Array(a.length); // at most 0.95 of full scale: never clips
     for (let j = 0; j < a.length; j++) {
       const fade = Math.min(1, j / fadeIn, (a.length - 1 - j) / fadeOut);
-      out[j] = a[j] * k * fade;
+      out[j] = Math.round(a[j] * k * fade * 32767);
     }
-    await save(f32(i), out);
+    await save(pcm(i), out);
     return out.length;
   });
   report("mix", 0.25, "Syncing Khmer voice to the video");
@@ -894,9 +989,17 @@ async function placeClips(segs: Segment[], dir: string, duration: number, match:
     const len = final[k];
     if (!len) return;
     const pos = Math.max(segs[i].start, cursor);
-    clips.push({ i, pos: Math.round(pos * SR), len, file: f32(i) });
+    clips.push({ i, pos: Math.round(pos * SR), len, file: pcm(i) });
     cursor = pos + len / SR + GAP;
   });
+  // decoded sound is not kept (the finished clips are), nor clips of lines that no longer have one
+  const used = new Set(clips.map((c) => c.i));
+  for (const n of await fsp.readdir(dir)) {
+    const p = /^(\d+)\.(f32|pcm)$/.exec(n);
+    if (p && (p[2] === "f32" || !used.has(+p[1]))) await fsp.rm(path.join(dir, n), { force: true });
+  }
+  for (const i of Object.keys(made).map(Number)) if (i >= segs.length) delete made[i];
+  await fsp.writeFile(book, JSON.stringify(made), "utf8");
   return clips;
 }
 
@@ -940,17 +1043,17 @@ async function writeVoiceTrack(jd: string, clips: Clip[], duration: number) {
   const n = Math.ceil(duration * SR);
   async function* samples() {
     const sorted = [...clips].sort((a, b) => a.pos - b.pos);
-    let next = 0, active: { pos: number; data: Float32Array }[] = [];
+    let next = 0, active: { pos: number; data: Int16Array }[] = [];
     for (let a = 0; a < n; a += SR * 10) {
       const b = Math.min(n, a + SR * 10), out = new Float32Array(b - a);
       while (next < sorted.length && sorted[next].pos < b) {
-        const bytes = await fsp.readFile(sorted[next].file), data = new Float32Array(bytes.length / 4);
+        const bytes = await fsp.readFile(sorted[next].file), data = new Int16Array(bytes.length / 2);
         new Uint8Array(data.buffer).set(bytes);
         active.push({ pos: sorted[next++].pos, data });
       }
       for (const c of active) {
         const from = Math.max(a, c.pos), to = Math.min(b, c.pos + c.data.length);
-        for (let t = from; t < to; t++) out[t - a] += c.data[t - c.pos];
+        for (let t = from; t < to; t++) out[t - a] += c.data[t - c.pos] / 32768;
       }
       active = active.filter((c) => c.pos + c.data.length > b);
       yield Buffer.from(out.buffer);
@@ -962,10 +1065,28 @@ async function writeVoiceTrack(jd: string, clips: Clip[], duration: number) {
   let err = "";
   enc.stderr.on("data", (c: Buffer) => (err = (err + c).slice(-2000)));
   const done = new Promise<number>((r) => enc.on("close", (code) => r(code ?? 1)));
-  await pipeline(Readable.from(samples()), enc.stdin);
+  await pipeline(Readable.from(samples()), enc.stdin)
+    .catch((e) => pipeError(e, [{ p: enc, done, err: () => err, what: "Writing the Khmer voice track failed" }]));
   if ((await done) !== 0) throw new Error("Writing the Khmer voice track failed:\n" + err);
 }
 export const VOICE_TRACK = "voice_track.m4a";
+
+/**
+ * A pipe into or out of ffmpeg broke. Node then only says "write EPIPE"; the cause (disk full, file locked, input
+ * unreadable) is in the stderr of the ffmpeg that stopped. All of them are stopped and waited for, and that message
+ * is thrown (`procs`: the likeliest cause first).
+ */
+async function pipeError(e: unknown, procs: { p: ChildProcess; done: Promise<number>; err: () => string; what: string }[]): Promise<never> {
+  // a moment for the one that failed to finish saying why; the others are then stopped
+  await Promise.race([Promise.all(procs.map((x) => x.done)), sleep(3000)]);
+  const own = procs.filter((x) => x.p.exitCode !== null && x.p.exitCode !== 0 && x.err().trim());
+  for (const x of procs) if (x.p.exitCode === null) x.p.kill();
+  await Promise.all(procs.map((x) => x.done));
+  // the other end of a broken pipe only says so; the one with another message is the cause
+  const why = own.find((x) => !/broken pipe|end of file|error writing|pipe:/i.test(x.err()));
+  if (why) throw new Error(`${why.what}:\n${why.err()}`);
+  throw new Error(`${procs[0].what}: ${e instanceof Error ? e.message : String(e)}${own[0] ? "\n" + own[0].err() : ""}`);
+}
 
 /**
  * Streams the sound in as 5 channels of f32 (music & effects L/R, original voices L/R, Khmer voice), dips the
@@ -979,8 +1100,17 @@ class Mixer extends Transform {
   private po = 1; // per-part level of the original sound and of the Khmer voice at the current sample
   private pk = 1;
 
+  // The part levels only change at a part's edges and inside its ramps: between two of these moments they stay as
+  // they are and are not worked out again (hours of samples times up to 30 parts).
+  private edges: number[];
+  private ei = 0;
+  private until = -1; // the levels hold until this time
+
   constructor(private n: number, private env: { t: number[]; g: number[] } | null,
-              private parts: Part[], private report: Report) { super(); }
+              private parts: Part[], private report: Report) {
+    super();
+    this.edges = parts.flatMap((p) => [p.from, p.from + PART_RAMP, p.to - PART_RAMP, p.to]).sort((a, b) => a - b);
+  }
 
   _transform(chunk: Buffer, _e: BufferEncoding, cb: TransformCallback) {
     try {
@@ -1003,6 +1133,13 @@ class Mixer extends Transform {
 
   /** Levels of the parts covering `t`, with a short ramp at their edges so nothing clicks. */
   private part(t: number) {
+    if (t < this.until) return;
+    while (this.ei < this.edges.length && this.edges[this.ei] <= t) this.ei++;
+    const next = this.edges[this.ei] ?? Infinity;
+    // up to the next edge, t is either inside some ramp (worked out sample by sample) or in none (levels hold)
+    const mid = next === Infinity ? t + 1 : (t + next) / 2;
+    const ramp = this.parts.some((p) => (mid > p.from && mid < p.from + PART_RAMP) || (mid > p.to - PART_RAMP && mid < p.to));
+    this.until = ramp ? -1 : next;
     let o = 1, k = 1;
     for (const p of this.parts) {
       const r = Math.min(1, (t - p.from) / PART_RAMP, (p.to - t) / PART_RAMP);
@@ -1071,8 +1208,10 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
 
   const ffmpeg = tool("ffmpeg");
   const voices = bgMode === "duck" && stems && m.voices > 0;
+  // a video without a sound track (only edited, not dubbed): silence in place of its sound
+  const orig = bgMode === "duck" && (stems || await hasAudio(src));
   const inputs = [
-    ...(bgMode === "duck" ? ["-i", stems ? bg : src]
+    ...(orig ? ["-i", stems ? bg : src]
       : ["-f", "lavfi", "-t", duration.toFixed(3), "-i", `anullsrc=r=${SR}:cl=stereo`]),
     ...(voices ? ["-i", vocals] : []),
     ...(music ? ["-stream_loop", "-1", "-i", music] : []),
@@ -1089,7 +1228,7 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
   const den = m.denoise ? `,highpass=f=60,afftdn=nr=${m.denoise === 2 ? 20 : 10}:nf=-40:tn=1` : "";
   // channels 1-2: music & effects (and your music), 3-4: the original voices (silent when not kept), 5: Khmer voice
   const graph = [
-    `[0:a]${stereo}${bgMode === "duck" ? den : ""},volume=${high.toFixed(3)}[m0]`,
+    `[0:a]${stereo}${orig ? den : ""},volume=${high.toFixed(3)}[m0]`,
     music ? `[${voices ? 2 : 1}:a]${stereo},volume=${(m.bgm / 100).toFixed(3)}[bm];[m0][bm]amix=inputs=2:duration=first:normalize=0[m]`
       : "[m0]anull[m]",
     voices ? `[1:a]${stereo}${den}${origTone ? "," + origTone : ""},volume=${(m.voices / 100).toFixed(3)}[v]`
@@ -1116,7 +1255,10 @@ async function mix(jd: string, src: string, segs: Segment[], clips: Clip[], dura
   enc.stderr.on("data", (c: Buffer) => (encErr = (encErr + c).slice(-2000)));
   const encDone = new Promise<number>((r) => enc.on("close", (code) => r(code ?? 1)));
 
-  await pipeline(dec.stdout, new Mixer(n, env, m.parts, report), enc.stdin);
+  await pipeline(dec.stdout, new Mixer(n, env, m.parts, report), enc.stdin).catch((e) => pipeError(e, [
+    { p: enc, done: encDone, err: () => encErr, what: "Audio encoding failed" },
+    { p: dec, done: decDone, err: () => decErr, what: "Reading the original sound failed" },
+  ]));
   if ((await decDone) !== 0) throw new Error("Reading the original sound failed:\n" + decErr);
   if ((await encDone) !== 0) throw new Error("Audio encoding failed:\n" + encErr);
   return clips;
@@ -1222,7 +1364,8 @@ async function mux(jd: string, src: string, opts: Opts, duration: number, report
     const audio = sound ? ["-af", sound, ...aac] : ["-c:a", "copy"];
     try {
       await go([...base, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", ...audio, ...tail]);
-    } catch { // source codec can't go into MP4 as-is
+    } catch (e) { // source codec can't go into MP4 as-is; anything else (disk full, file locked) is the real error
+      if (!COPY_REFUSED.test(e instanceof Error ? e.message : String(e))) throw e;
       await go([...base, "-map", "0:v:0", "-map", "1:a:0", ...encode, ...audio, ...tail]);
     }
     return;
@@ -1250,9 +1393,14 @@ async function mux(jd: string, src: string, opts: Opts, duration: number, report
     await go([...base, "-filter_complex", graph, "-map", "[vc]", "-map", "[ac]", ...encode, ...aac, ...tail]);
     return;
   }
-  await go([...base, "-filter_complex", graph, "-map", "[v]", "-map", "[a]", ...encode,
+  // sound without changes stays out of the filter graph: ffmpeg cannot copy a stream that came through one
+  if (!sound) graph = graph.replace(/;\[1:a\]anull\[a\]$/, "");
+  await go([...base, "-filter_complex", graph, "-map", "[v]", "-map", sound ? "[a]" : "1:a:0", ...encode,
     ...(sound ? aac : ["-c:a", "copy"]), ...tail]);
 }
+
+/** What ffmpeg says when a picture can't be copied into MP4 as it is (codec or timestamps the container won't take). */
+const COPY_REFUSED = /codec not currently supported|could not find tag for codec|incorrect codec parameters|could not write header|incompatible with output codec|not supported (in|by) (this )?(container|muxer)|non[- ]monoton|invalid dts|invalid pts|bitstream filter/i;
 
 /** The same video in the other shapes asked for (output_9x16.mp4 …); shapes no longer wanted are removed. */
 async function moreShapes(jd: string, opts: Opts, meta: Meta, report: Report) {
@@ -1268,12 +1416,12 @@ export async function render(jd: string, opts: Opts, meta: Meta, report: Report)
 }
 
 /** One frame at `t` seconds with the subtitles and logo exactly as the video will show them (PNG). */
-export async function previewFrame(jd: string, opts: Opts, meta: Meta, t: number): Promise<Buffer> {
+export async function previewFrame(jd: string, opts: Opts, meta: Meta, t: number, signal?: AbortSignal): Promise<Buffer> {
   const src = path.join(jd, meta.input);
   const { inputs, filter } = await look(jd, src, { ...opts, burn: true }, meta.duration, t, true);
   return run(tool("ffmpeg"), ["-v", "error", "-ss", t.toFixed(3), "-i", path.basename(src),
     "-f", "lavfi", "-i", "anullsrc", "-f", "lavfi", "-i", "anullsrc", ...inputs,
-    "-filter_complex", filter!, "-map", "[v]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], { cwd: jd });
+    "-filter_complex", filter!, "-map", "[v]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], { cwd: jd, signal });
 }
 
 // ---------------------------------------------------------------- thumbnail
@@ -1300,7 +1448,7 @@ export function parseThumb(v: unknown): ThumbOpts {
  * title in the subtitle font with a thick outline (libass shapes Khmer correctly), your logo in a corner.
  * Saved as thumbnail.jpg; returns the JPG.
  */
-export async function thumbnail(jd: string, opts: Opts, meta: Meta, th: ThumbOpts): Promise<Buffer> {
+export async function thumbnail(jd: string, opts: Opts, meta: Meta, th: ThumbOpts, signal?: AbortSignal): Promise<Buffer> {
   const [W, H] = th.shape === "9:16" ? [1080, 1920] : [1280, 720];
   const sub = parseSubStyle(opts.sub);
   const px = Math.round((H * th.size) / 100);
@@ -1325,7 +1473,7 @@ export async function thumbnail(jd: string, opts: Opts, meta: Meta, th: ThumbOpt
   steps.push(`[${last}]format=yuvj420p[v]`);
   const t = Math.max(0, Math.min(meta.duration - 0.1, th.t));
   const jpg = await run(tool("ffmpeg"), ["-v", "error", "-ss", t.toFixed(3), "-i", meta.input, ...(logo ? ["-i", logo] : []),
-    "-filter_complex", steps.join(";"), "-map", "[v]", "-frames:v", "1", "-q:v", "2", "-f", "image2pipe", "-c:v", "mjpeg", "-"], { cwd: jd });
+    "-filter_complex", steps.join(";"), "-map", "[v]", "-frames:v", "1", "-q:v", "2", "-f", "image2pipe", "-c:v", "mjpeg", "-"], { cwd: jd, signal });
   fs.writeFileSync(path.join(jd, "thumbnail.jpg"), jpg);
   return jpg;
 }
@@ -1336,16 +1484,21 @@ export async function thumbnail(jd: string, opts: Opts, meta: Meta, th: ThumbOpt
  * Silent parts to cut out (jump cut): where the original sound stays below `db` for at least `min` seconds and
  * nobody speaks (no line, no Khmer voice). A little of each silence is left at both ends, so speech is not clipped.
  */
-export async function findSilences(jd: string, meta: Meta, min = 0.8, db = -35): Promise<Range[]> {
+export async function findSilences(jd: string, meta: Meta, min = 0.8, db = -35, signal?: AbortSignal): Promise<Range[]> {
   const PAD = 0.15;
   let wav = path.join(jd, "audio16k.wav");
   if (!fs.existsSync(wav)) {
-    await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, meta.input), "-vn", "-ac", "1", "-ar", "16000", wav]);
+    // a video without a sound track is silent from end to end: no pauses to tell apart, nothing to cut
+    if (!(await hasAudio(path.join(jd, meta.input)))) return [];
+    // under another name until complete: a search stopped half-way (a newer one came) leaves no cut-short track
+    const part = path.join(jd, "audio16k.part.wav");
+    await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", path.join(jd, meta.input), "-vn", "-ac", "1", "-ar", "16000", part], { signal });
+    await fsp.rename(part, wav);
   }
   const quiet: Range[] = [];
   let from = -1;
   await run(tool("ffmpeg"), ["-v", "info", "-nostats", "-i", wav, "-af", `silencedetect=noise=${db}dB:d=${min}`, "-f", "null", "-"], {
-    keepOutput: false,
+    keepOutput: false, signal,
     onLine: (l) => {
       const a = l.match(/silence_start: ([\d.]+)/), b = l.match(/silence_end: ([\d.]+)/);
       if (a) from = +a[1];
@@ -1377,7 +1530,7 @@ export async function findSilences(jd: string, meta: Meta, min = 0.8, db = -35):
 export async function dub(jd: string, opts: Opts, meta: Meta, report: Report): Promise<string | undefined> {
   const segs = loadSegments(jd);
   if (segs.some((s) => !s.voice) && fs.existsSync(path.join(jd, "audio16k.wav"))) { // jobs from before analysis
-    analyzeSpeakers(jd, segs, report);
+    await analyzeSpeakers(jd, segs, report);
     saveSegments(jd, segs);
   }
   if (opts.voice === "clone" && (segs.some((s) => s.speaker === undefined) || !fs.existsSync(speakerSample(jd, 0)))) {
@@ -1420,7 +1573,7 @@ async function layers(jd: string, segs: Segment[], opts: Opts, meta: Meta, repor
   const src = path.join(jd, meta.input);
   if (stems && wantsStems(opts)) await separateVoices(jd, meta, report); // done once per video, then kept
   const clips = await placeClips(segs, path.join(jd, "tts"), meta.duration, opts.match !== false, opts.voice === "clone", report);
-  await writeVoiceTrack(jd, clips, meta.duration);
+  await writeVoiceTrack(jd, clips, meta.duration); // the clips stay for the next export (placeClips)
   writeSubs(jd, timedSubs(segs, clips, meta.duration));
   return clips;
 }
@@ -1434,6 +1587,7 @@ const wantsStems = (opts: Opts) => parseMix(opts.mix).split && opts.bgMode === "
 /** Splits the original sound into voices and music & effects (vocals.wav, background.wav); kept once made. */
 export async function separateVoices(jd: string, meta: Meta, report: Report) {
   if (!cloneAvailable()) throw new Error("Separating voices from music needs the voice tools - run: npm run setup");
+  if (!(await hasAudio(path.join(jd, meta.input)))) throw new Error("This video has no sound track - there are no voices to separate");
   report("separate", 0, "Separating voices from music");
   await separate(jd, path.join(jd, meta.input), meta.duration,
     (f) => report("separate", f, `Separating voices from music ${Math.round(f * 100)}%`));

@@ -1,5 +1,5 @@
 /**
- * Bridge to the Python voice-cloning worker (scripts/voice_clone.py), installed by: npm run setup -- --clone
+ * Bridge to the Python voice-cloning worker (scripts/voice_clone.py), installed by: npm run setup (start.cmd)
  * Separates voices from music, finds who speaks each line, and re-speaks the Khmer lines in those voices.
  */
 import { fs, fsp, path } from "./rt";
@@ -9,12 +9,14 @@ const PY_DIR = path.join(ROOT, "py");
 const PYTHON = path.join(PY_DIR, "venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const SCRIPT = path.join(ROOT, "scripts", "voice_clone.py");
 
+// .packages.json: written by setup only once the packages installed and load (a half-finished install has none)
 export const cloneAvailable = () =>
-  fs.existsSync(PYTHON) && fs.existsSync(path.join(PY_DIR, "src", "seed-vc")) && fs.existsSync(SCRIPT);
+  fs.existsSync(PYTHON) && fs.existsSync(path.join(PY_DIR, "venv", ".packages.json"))
+  && fs.existsSync(path.join(PY_DIR, "src", "seed-vc", "inference.py")) && fs.existsSync(SCRIPT);
 
 /** Runs one worker command; `onProgress` gets 0..1. Request and result travel as JSON files in the job folder. */
 async function worker<T>(cmd: string, jd: string, req: object, onProgress: (frac: number) => void): Promise<T> {
-  if (!cloneAvailable()) throw new Error("Voice cloning is not installed - run: npm run setup -- --clone");
+  if (!cloneAvailable()) throw new Error("Voice cloning is not installed - close the app and run start.cmd again (setup installs it)");
   const reqFile = path.join(jd, `clone_${cmd}.json`), resFile = path.join(jd, `clone_${cmd}.result.json`);
   await fsp.writeFile(reqFile, JSON.stringify(req), "utf8");
   await fsp.rm(resFile, { force: true });

@@ -14,11 +14,25 @@ export function parseGlossary(v: unknown): GlossEntry[] {
 
 /** Every glossary word in `text` replaced by its Khmer; longer entries first (so "Li Ming" wins over "Li"). */
 export function applyGlossary(text: string, g: GlossEntry[]): string {
-  for (const e of [...g].sort((a, b) => b.from.length - a.from.length)) {
+  const c = compiled(g);
+  return c ? text.replace(c.re, (...m) => c.to[m.slice(1, c.to.length + 1).findIndex((x) => x !== undefined)]) : text;
+}
+
+/**
+ * All entries in one pattern, made once per glossary: the text is gone through once, so a shorter entry can't match
+ * inside the Khmer an earlier entry put in, and hundreds of patterns are not built again for every line.
+ */
+const made = new WeakMap<GlossEntry[], { re: RegExp; to: string[] } | null>();
+function compiled(g: GlossEntry[]) {
+  if (made.has(g)) return made.get(g) ?? null;
+  const sorted = g.filter((e) => e.from).sort((a, b) => b.from.length - a.from.length); // longest first: it wins where both fit
+  const alt = sorted.map((e) => {
     const esc = e.from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     // whole words for Latin letters ("Li" not inside "Like"); Chinese and Khmer have no spaces between words
     const pre = /^\w/.test(e.from) ? "\\b" : "", post = /\w$/.test(e.from) ? "\\b" : "";
-    text = text.replace(new RegExp(pre + esc + post, "giu"), () => e.to);
-  }
-  return text;
+    return `(${pre}${esc}${post})`;
+  });
+  const c = sorted.length ? { re: new RegExp(alt.join("|"), "giu"), to: sorted.map((e) => e.to) } : null;
+  made.set(g, c);
+  return c;
 }

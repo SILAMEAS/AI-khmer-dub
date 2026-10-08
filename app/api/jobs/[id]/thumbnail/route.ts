@@ -1,4 +1,5 @@
 import { jobDir, jobs } from "@/lib/jobs";
+import { latestOnly, previewFailed } from "@/lib/limits";
 import { parseThumb, thumbnail } from "@/lib/pipeline";
 import { parseSubStyle } from "@/lib/branding";
 
@@ -9,11 +10,14 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const job = jobs.get((await params).id);
   if (!job?.meta) return Response.json({ detail: "Job not found" }, { status: 404 });
-  const b: Record<string, unknown> = await req.json().catch(() => ({}));
+  const meta = job.meta;
+  const b: Record<string, unknown> = await req.json().catch(() => ({})) ?? {};
   try {
-    const jpg = await thumbnail(jobDir(job.id), { ...job.opts, sub: b.sub ? parseSubStyle(b.sub) : job.opts.sub }, job.meta, parseThumb(b));
+    // one at a time per project: two at once would also write thumbnail.jpg and thumb.ass over each other
+    const jpg = await latestOnly(`thumbnail:${job.id}`, req.signal,
+      (signal) => thumbnail(jobDir(job.id), { ...job.opts, sub: b.sub ? parseSubStyle(b.sub) : job.opts.sub }, meta, parseThumb(b), signal));
     return new Response(new Uint8Array(jpg), { headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store" } });
   } catch (e) {
-    return Response.json({ detail: e instanceof Error ? e.message : String(e) }, { status: 500 });
+    return previewFailed(e);
   }
 }

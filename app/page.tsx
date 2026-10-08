@@ -4,10 +4,10 @@
  * The editor, laid out like CapCut: tools on the left, the player in the middle, settings on the right and the
  * timeline below. Every setting shows live in the player; only Export merges the layers into one video.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  api, clock, DEFAULT_EDIT, DEFAULT_MIX, fullEdit, fullMix, parseTime, uploadFile, type EditOpts, type Job, type Mix,
-  type Segment, type Voice, type VoiceChoice,
+  api, ApiError, clock, DEFAULT_EDIT, DEFAULT_MIX, fullEdit, fullMix, makePlayhead, parseTime, uploadFile, usePlayhead, type EditOpts,
+  type Job, type Mix, type Playhead, type Segment, type Voice, type VoiceChoice,
 } from "./editor/common";
 import {
   addCuts, Batch, CutList, DEFAULT_THUMB, EditPanel, Glossary, StickerLibrary, StickerSettings, ThumbnailMaker, ThumbnailStyle,
@@ -63,12 +63,129 @@ function VoiceCard({ v, on, onPick, rate, off }: { v: VoiceChoice; on: boolean; 
   const [cls, icon, name, sub] = CARDS[v];
   return (
     <div className={`voice ${cls} ${on ? "on" : ""} ${off ? "off" : ""}`} role="radio" aria-checked={on} aria-disabled={!!off}
-      tabIndex={0} title={off} onClick={() => !off && onPick()} onKeyDown={(e) => !off && (e.key === "Enter" || e.key === " ") && onPick()}>
+      tabIndex={0} title={off} onClick={() => !off && onPick()} onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault(); e.stopPropagation(); // Space picks the voice; it must not also start the video
+        if (!off) onPick();
+      }}>
       <div className="av">{icon}</div>
       <div><b>{name}</b> <span className="km">{KM_LABEL[v]}</span><small>{off || sub}</small></div>
       {(v === "male" || v === "female") && (
-        <button type="button" className="btn ghost sm play" onClick={(e) => { e.stopPropagation(); new Audio(`/api/voices/preview?voice=${v}&rate=${rate}`).play(); }}>▶</button>
+        <button type="button" className="btn ghost sm play" onClick={(e) => { e.stopPropagation(); playSample(`/api/voices/preview?voice=${v}&rate=${rate}`); }}>▶</button>
       )}
+    </div>
+  );
+}
+
+/** Plays a short sample; one that can't be played (not made yet, server gone) is simply not heard. */
+const playSample = (url: string) => { new Audio(url).play().catch(() => {}); };
+
+/** Shows a part with the playhead's time: only that part is drawn again while the video plays, not the editor. */
+function AtPlayhead({ playhead, children }: { playhead: Playhead; children: (t: number) => React.ReactNode }) {
+  return <>{children(usePlayhead(playhead))}</>;
+}
+
+// ---------------------------------------------------------------- captions list
+// A long video has thousands of lines: only the ones near what is visible are in the page (plus the selected one,
+// so the line being typed in keeps its focus). Rows grow with their text, so each is measured once drawn; the
+// ones not drawn yet count as the first rows' average height.
+const CAP_GAP = 4, CAP_EST = 50, CAP_MORE = 600; // px between rows, a first guess of a row's height, px drawn beyond the view
+
+/** One line in the captions list; drawn again only when it changes itself, not when another line is typed in. */
+const CapRow = memo(function CapRow({ s, i, top, on, hit, edited, onPick, onText }: {
+  s: Segment; i: number; top: number; on: boolean; hit: boolean; edited: boolean;
+  onPick: (i: number, t: number) => void; onText: (i: number, km: string) => void;
+}) {
+  return (
+    <div data-i={i} className={`cap ${on ? "on" : ""} ${hit ? "hit" : ""}`} style={{ top }} onClick={() => onPick(i, s.start)}>
+      <span className="cap-t">{clock(s.start)}{edited && <i className="dot" />}</span>
+      <textarea className="km" rows={1} value={s.km} onChange={(e) => onText(i, e.target.value)} onFocus={() => onPick(i, s.start)} />
+    </div>
+  );
+});
+
+function CapList({ segs, selected, find, edited, onPick, onText }: {
+  segs: Segment[]; selected: number | null; find: string; edited: Set<number>;
+  onPick: (i: number, t: number) => void; onText: (i: number, km: string) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const heights = useRef<number[]>([]); // each row's measured height with the gap below it (0 = not drawn yet)
+  const guess = useRef(0); // height of a row not drawn yet; set once, so rows far away don't move later
+  if (heights.current.length !== segs.length) { heights.current = new Array(segs.length).fill(0); guess.current = 0; }
+  const [, setMeasured] = useState(0);
+  const [view, setView] = useState({ top: 0, h: 600 });
+  const want = useRef<number | null>(null); // a line to scroll into view, once the rows around it are measured
+
+  // where each row starts (the last entry is the whole height)
+  const hs = heights.current;
+  const est = guess.current || CAP_EST;
+  const tops = new Array<number>(segs.length + 1);
+  tops[0] = 0;
+  for (let i = 0; i < segs.length; i++) tops[i + 1] = tops[i] + (hs[i] || est);
+  const topsRef = useRef(tops);
+  topsRef.current = tops;
+
+  // the rows to draw: the visible ones and some more above and below (found by halving, the list can be long)
+  const firstEnding = (y: number) => {
+    let lo = 0, hi = segs.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (tops[m + 1] <= y) lo = m + 1; else hi = m; }
+    return lo;
+  };
+  const from = firstEnding(view.top - CAP_MORE), to = Math.min(segs.length, firstEnding(view.top + view.h + CAP_MORE) + 1);
+  const rows: number[] = [];
+  for (let i = from; i < to; i++) rows.push(i);
+  if (selected !== null && selected < segs.length && (selected < from || selected >= to)) rows.push(selected);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setView({ top: el.scrollTop, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // the selected line is to scroll into view (also when the list opens with one selected)
+  useLayoutEffect(() => { want.current = selected; }, [selected]);
+
+  // measure the rows just drawn; a row above the view that turns out taller or shorter moves the scroll by as much,
+  // so what you are looking at stays put
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const hs = heights.current, tops = topsRef.current;
+    let changed = false, shift = 0;
+    el.querySelectorAll<HTMLElement>("[data-i]").forEach((row) => {
+      const i = +row.dataset.i!, h = row.offsetHeight + CAP_GAP, old = hs[i] || est;
+      if (hs[i] && Math.abs(h - old) < 0.5) return;
+      if (tops[i] < el.scrollTop) shift += h - old;
+      hs[i] = h;
+      changed = true;
+    });
+    if (!guess.current && changed) { // the first rows drawn give the guess for all the others
+      let sum = 0, n = 0, above = 0;
+      hs.forEach((h, i) => { if (h) { sum += h; n++; } else if (tops[i + 1] <= el.scrollTop) above++; });
+      guess.current = sum / n;
+      shift += above * (guess.current - est);
+    }
+    if (shift) el.scrollTop += shift;
+    if (changed) { setMeasured((k) => k + 1); return; }
+    // all measured: now the selected line can be scrolled to (as little as needed)
+    const sel = want.current;
+    want.current = null;
+    if (sel === null || sel >= segs.length) return;
+    const a = tops[sel], b = tops[sel + 1] - CAP_GAP;
+    if (a < el.scrollTop) el.scrollTop = a;
+    else if (b > el.scrollTop + el.clientHeight) el.scrollTop = b - el.clientHeight;
+  });
+
+  return (
+    <div className="cap-list" ref={ref} onScroll={(e) => setView({ top: e.currentTarget.scrollTop, h: e.currentTarget.clientHeight })}>
+      <div className="cap-win" style={{ height: tops[segs.length] }}>
+        {rows.map((i) => (
+          <CapRow key={i} s={segs[i]} i={i} top={tops[i]} on={selected === i} hit={!!find && segs[i].km.includes(find)}
+            edited={edited.has(i)} onPick={onPick} onText={onText} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -120,7 +237,9 @@ export default function Studio() {
   // editor
   const [tab, setTab] = useState<Tab>("media");
   const [view, setView] = useState<"edit" | "final">("edit");
-  const [time, setTime] = useState(0);
+  // the playhead's time is not state here: it changes 15 times a second while playing, and drawing the whole
+  // editor again each time is far too slow for a long video. The parts that show it listen to it themselves.
+  const [playhead] = useState(makePlayhead);
   const [duration, setDuration] = useState(0);
   const [pendingExport, setPendingExport] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -163,9 +282,9 @@ export default function Studio() {
   const openJob = useCallback((id: string | null) => {
     setJobId(id); setJob(null); setSegs(null); setBaseSegs(null); setSelected(null); setSelectedPart(null);
     setEdit(DEFAULT_EDIT); setMarks({ in: null, out: null }); setSelectedCut(null); setSelectedSticker(null);
-    setView("edit"); setTime(0); setPollKey((k) => k + 1); setErr("");
+    setView("edit"); playhead.set(0); setPollKey((k) => k + 1); setErr("");
     try { id ? localStorage.setItem("khmerDubJob", id) : localStorage.removeItem("khmerDubJob"); } catch {}
-  }, []);
+  }, [playhead]);
 
   useEffect(() => {
     setLook(savedLook());
@@ -208,7 +327,12 @@ export default function Studio() {
         setJob(j);
         if (j.status === "queued" || j.status === "running" || j.task) timer = setTimeout(tick, 1200);
         else loadHistory();
-      } catch { if (!stop) openJob(null); }
+      } catch (e) {
+        if (stop) return;
+        // only a project that is gone is closed; a network blip or a restarting server is tried again
+        if (e instanceof ApiError && e.status === 404) openJob(null);
+        else timer = setTimeout(tick, 3000);
+      }
     };
     tick();
     return () => { stop = true; clearTimeout(timer); };
@@ -223,6 +347,9 @@ export default function Studio() {
   useEffect(() => setSynced(""), [jobId]);
   const sentSegs = useRef<Segment[] | null>(null); // the lines as last sent to be voiced
   const baseRef = useRef<Segment[] | null>(null);
+  const openId = useRef(jobId); // the project open now (a late answer for another one is ignored)
+  openId.current = jobId;
+  useEffect(() => { sentSegs.current = null; baseRef.current = null; }, [jobId]);
   useEffect(() => {
     if (!job || !ready) return;
     const first = synced !== job.id;
@@ -232,6 +359,7 @@ export default function Studio() {
       setSynced(job.id);
     }
     api<Segment[]>(`/api/jobs/${job.id}/segments`).then((saved) => {
+      if (openId.current !== job.id) return; // another project was opened meanwhile
       const before = sentSegs.current ?? baseRef.current;
       baseRef.current = saved;
       setBaseSegs(saved);
@@ -257,8 +385,9 @@ export default function Studio() {
   const stemsWanted = (clone || mix.split) && bgMode === "duck";
   const voicesChanged = !!job && job.status === "done" && (edited.size > 0 || voice !== job.opts.voice
     || match !== (job.opts.match !== false) || rate !== (job.opts.rate ?? 0));
-  const settingsNow = JSON.stringify([look, mix, bgMode, edit]);
-  const settingsJob = job ? JSON.stringify([fullLook(job.opts), fullMix(job.opts.mix), job.opts.bgMode, fullEdit(job.opts.edit)]) : "";
+  // (only worked out again when the settings or the job change, not each time a line is typed in)
+  const settingsNow = useMemo(() => JSON.stringify([look, mix, bgMode, edit]), [look, mix, bgMode, edit]);
+  const settingsJob = useMemo(() => (job ? JSON.stringify([fullLook(job.opts), fullMix(job.opts.mix), job.opts.bgMode, fullEdit(job.opts.edit)]) : ""), [job]);
   const editOnly = job?.opts.mode === "edit";
   const exportCurrent = !!job?.tracks?.output && job.exported === job.version && !voicesChanged && settingsNow === settingsJob;
   const working = job?.status === "queued" || job?.status === "running";
@@ -313,8 +442,10 @@ export default function Studio() {
   }
 
   /** Make the Khmer voices (only lines that changed are made again) and the layers for the preview. */
+  const acting = useRef(false); // a request to start work is on its way: a second click does nothing
   async function makeVoices(auto = false) {
-    if (!jobId) return;
+    if (!jobId || acting.current) return;
+    acting.current = true;
     if (!auto) videoRef.current?.pause(); // made by itself: the video keeps playing
     const body: Record<string, unknown> = settingsBody();
     if (segs) body.segments = segs.map((s, i) => ({ i, km: s.km, voice: s.voice, speaker: s.speaker }));
@@ -322,7 +453,10 @@ export default function Studio() {
     try {
       await api(`/api/jobs/${jobId}/dub`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       setPollKey((k) => k + 1);
-    } catch (e) { if (auto) setErr((e as Error).message); else alert((e as Error).message); }
+    } catch (e) {
+      setPendingExport(false); // no new voices: no export waiting for them
+      if (auto) setErr((e as Error).message); else alert((e as Error).message);
+    } finally { acting.current = false; }
   }
 
   // A changed voice, speed or "sound like the speaker" is applied by itself; edited lines too, once you stop
@@ -339,17 +473,35 @@ export default function Studio() {
     if (!jobId) return;
     setTab("export");
     if (voicesChanged) { setPendingExport(true); await makeVoices(); return; }
+    if (acting.current) return;
+    acting.current = true;
     videoRef.current?.pause();
     try {
       await api(`/api/jobs/${jobId}/render`, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...look, mix, bgMode, edit }) });
       setPollKey((k) => k + 1);
-    } catch (e) { alert((e as Error).message); }
+    } catch (e) { alert((e as Error).message); } finally { acting.current = false; }
   }
   useEffect(() => { // export asked for while the voices were being made
+    // (also when the new lines arrive after the job: until then the old ones make the voices look changed)
     if (pendingExport && job?.status === "done" && !voicesChanged) { setPendingExport(false); exportVideo(); }
     if (pendingExport && job?.status === "error") setPendingExport(false);
-  }, [job?.status, job?.version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job?.status, job?.version, voicesChanged]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Changes that are only in the editor (not yet sent with new voices or an export) are lost when the page
+  // closes or another project opens: ask first.
+  const unsaved = !!job && ready && synced === job.id && (edited.size > 0 || settingsNow !== settingsJob);
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsaved]);
+  const switchTo = (id: string | null) => {
+    if (id === jobId) return;
+    if (unsaved && !confirm("This project has changes that are not saved yet (they are saved when you make the voices or export). Leave it anyway?")) return;
+    openJob(id);
+  };
 
   /** The first step failed: run it again (a downloaded video is not downloaded twice). */
   async function retryFirstStep() {
@@ -368,7 +520,7 @@ export default function Studio() {
   const src = job?.meta ? `${base}source` : mode === "file" ? fileUrl : null;
   const finalSrc = job?.tracks?.output ? `${base}output.mp4?v=${v}` : null;
   const audio = useLiveAudio({
-    video: videoRef.current, segs, mix, bgMode, stems: stemsWanted, enabled: view === "edit",
+    video: videoRef, segs, mix, bgMode, stems: stemsWanted, enabled: view === "edit",
     urls: {
       voice: job?.tracks?.voice ? `${base}voice_track.m4a?v=${v}` : undefined,
       vocals: job?.tracks?.vocals && stemsWanted ? `${base}vocals.wav` : undefined,
@@ -376,16 +528,20 @@ export default function Studio() {
       bgm: mix.bgm && brand?.music ? brand.music.url : undefined,
     },
   });
-  const seek = (t: number) => { const el = videoRef.current; if (el) el.currentTime = Math.max(0, Math.min(t, el.duration || t)); setTime(t); };
+  const seek = useCallback((t: number) => {
+    const el = videoRef.current;
+    if (el) el.currentTime = Math.max(0, Math.min(t, el.duration || t));
+    playhead.set(t);
+  }, [playhead]);
   const playRange = (a: number, b: number) => {
     const el = videoRef.current;
     if (!el) return;
     audio.start(); el.currentTime = a; stopAt.current = b; el.play().catch(() => {});
   };
   const onTime = useCallback((t: number) => {
-    setTime(t);
+    playhead.set(t);
     if (stopAt.current !== null && t >= stopAt.current) { stopAt.current = null; videoRef.current?.pause(); }
-  }, []);
+  }, [playhead]);
   const startAt = useRef<number | null>(null);
   const onDuration = useCallback((d: number) => {
     setDuration(d);
@@ -465,15 +621,25 @@ export default function Studio() {
     return () => window.removeEventListener("keydown", key);
   }, []);
 
+  // a cut is selected by its place in the list: once the list changes (merged, sorted, undone) that may be another cut
+  useEffect(() => setSelectedCut(null), [edit.cuts]);
+
   // ---------------------------------------------------------------- lines
   const speakers = clone ? job?.meta?.speakers ?? 0 : 0;
-  const setLine = (i: number, p: Partial<Segment>) => setSegs((ss) => ss && ss.map((x, k) => (k === i ? { ...x, ...p } : x)));
-  const hits = find && segs ? segs.filter((x) => x.km.includes(find)).length : 0;
-  const listRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { // the selected line scrolls into view in the captions list
-    if (selected === null) return;
-    listRef.current?.querySelector(`[data-i="${selected}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [selected]);
+  // (the same functions every time, so the lines in the list and the timeline that didn't change aren't drawn again)
+  const setLine = useCallback((i: number, p: Partial<Segment>) => setSegs((ss) => ss && ss.map((x, k) => (k === i ? { ...x, ...p } : x))), []);
+  const setLineText = useCallback((i: number, km: string) => setLine(i, { km }), [setLine]);
+  const pickLine = useCallback((i: number, t: number) => { setSelected(i); seek(t); }, [seek]);
+  const hits = useMemo(() => (find && segs ? segs.filter((x) => x.km.includes(find)).length : 0), [find, segs]);
+  // clicked in the timeline or on the picture: selected, and its tool opened
+  const pickLineInTimeline = useCallback((i: number | null) => {
+    setSelected(i);
+    if (i !== null) setTab((t) => (t === "voice" ? t : "captions"));
+  }, []);
+  const pickPart = useCallback((i: number | null) => { setSelectedPart(i); setTab("audio"); }, []);
+  const pickCut = useCallback((i: number | null) => { setSelectedCut(i); setTab("edit"); }, []);
+  const pickSticker = useCallback((id: string | null) => { setSelectedSticker(id); setTab("stickers"); }, []);
+  const pickStickerOnPicture = useCallback((id: string | null) => { setSelectedSticker(id); if (id) setTab("stickers"); }, []);
 
   // ---------------------------------------------------------------- panels
   const lookProps = { value: look, onChange: setLook };
@@ -522,7 +688,7 @@ export default function Studio() {
               <b>{job.meta?.title || job.title}</b>
               <small>{!job.meta ? job.message : editOnly ? `${clock(job.meta.duration)} · ✂ edit only`
                 : `${clock(job.meta.duration)} · ${job.meta.language} · ${job.meta.segments} lines${job.meta.captions ? " · from subtitles" : ""}`}</small>
-              <button type="button" className="btn ghost sm" onClick={() => openJob(null)}>+ New project</button>
+              <button type="button" className="btn ghost sm" onClick={() => switchTo(null)}>+ New project</button>
             </div>
           ) : (
             <>
@@ -568,7 +734,7 @@ export default function Studio() {
             {history.length === 0 && <span className="note">None yet</span>}
             {history.map((h) => (
               <div key={h.id} className={`proj ${h.id === jobId ? "on" : ""}`}>
-                <button type="button" onClick={() => openJob(h.id)}>
+                <button type="button" onClick={() => switchTo(h.id)}>
                   <span>{h.meta?.title || h.title || h.id}</span>
                   <small>{h.meta ? `${clock(h.meta.duration)} · ` : ""}{h.status === "done" ? "ready" : h.status}</small>
                 </button>
@@ -579,12 +745,16 @@ export default function Studio() {
         </div>
       );
       case "edit": return (
-        <EditPanel value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0} marks={marks} onMarks={setMarks}
-          segs={segs} jobId={job?.meta ? job.id : undefined} />
+        <AtPlayhead playhead={playhead}>{(time) => (
+          <EditPanel value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0} marks={marks} onMarks={setMarks}
+            segs={segs} jobId={job?.meta ? job.id : undefined} />
+        )}</AtPlayhead>
       );
       case "stickers": return (
-        <StickerLibrary value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0}
-          onSelect={(id) => { setSelectedSticker(id); }} />
+        <AtPlayhead playhead={playhead}>{(time) => (
+          <StickerLibrary value={edit} onChange={setEdit} time={time} duration={duration || job?.meta?.duration || 0}
+            onSelect={(id) => { setSelectedSticker(id); }} />
+        )}</AtPlayhead>
       );
       case "thumb": return <ThumbnailStyle value={thumb} onChange={setThumb} hasLogo={!!brand?.logo} />;
       case "voice": return editOnly ? (
@@ -606,7 +776,7 @@ export default function Studio() {
               <h4>Voices found</h4>
               <div className="people">
                 {Array.from({ length: speakers }, (_, k) => (
-                  <button key={k} type="button" className={`btn ghost sm spk s${k % 6}`} onClick={() => new Audio(`${base}speaker_${k + 1}.wav`).play()}>
+                  <button key={k} type="button" className={`btn ghost sm spk s${k % 6}`} onClick={() => playSample(`${base}speaker_${k + 1}.wav`)}>
                     ▶ Person {k + 1} <small>({segs.filter((x) => x.speaker === k).length})</small>
                   </button>
                 ))}
@@ -630,15 +800,7 @@ export default function Studio() {
                 </div>
                 <Glossary segs={segs} onSegs={setSegs} />
               </div>
-              <div className="cap-list" ref={listRef}>
-                {segs.map((s, i) => (
-                  <div key={i} data-i={i} className={`cap ${selected === i ? "on" : ""} ${find && s.km.includes(find) ? "hit" : ""}`}
-                    onClick={() => { setSelected(i); seek(s.start); }}>
-                    <span className="cap-t">{clock(s.start)}{edited.has(i) && <i className="dot" />}</span>
-                    <textarea className="km" rows={1} value={s.km} onChange={(e) => setLine(i, { km: e.target.value })} onFocus={() => { setSelected(i); seek(s.start); }} />
-                  </div>
-                ))}
-              </div>
+              <CapList segs={segs} selected={selected} find={find} edited={edited} onPick={pickLine} onText={setLineText} />
             </>
           )}
         </div>
@@ -674,9 +836,9 @@ export default function Studio() {
           <h4>✂ Cut</h4>
           <small className="note">Dub only a part. Drag the white handles in the timeline, or type the times, or play and press the buttons.</small>
           <div className="row nowrap"><span className="lbl">From</span><TimeField value={trim.from} onChange={(t) => setTrim({ ...trim, from: t })} placeholder="0:00" />
-            <button type="button" className="btn ghost sm" disabled={!src} onClick={() => setTrim({ ...trim, from: Math.floor(time * 10) / 10 })}>⇤ Here</button></div>
+            <button type="button" className="btn ghost sm" disabled={!src} onClick={() => setTrim({ ...trim, from: Math.floor(playhead.get() * 10) / 10 })}>⇤ Here</button></div>
           <div className="row nowrap"><span className="lbl">To</span><TimeField value={trim.to} onChange={(t) => setTrim({ ...trim, to: t })} placeholder="end" />
-            <button type="button" className="btn ghost sm" disabled={!src} onClick={() => setTrim({ ...trim, to: Math.floor(time * 10) / 10 })}>Here ⇥</button></div>
+            <button type="button" className="btn ghost sm" disabled={!src} onClick={() => setTrim({ ...trim, to: Math.floor(playhead.get() * 10) / 10 })}>Here ⇥</button></div>
           {(trim.from > 0 || trim.to > 0) && <button type="button" className="btn ghost sm" onClick={() => setTrim({ from: 0, to: 0 })}>Whole video</button>}
         </div>
       );
@@ -684,8 +846,16 @@ export default function Studio() {
         <CutList value={edit} onChange={setEdit} selected={selectedCut} onSelect={setSelectedCut} onSeek={seek}
           onPlayFrom={(t) => { const el = videoRef.current; if (el) { audio.start(); el.currentTime = t; el.play().catch(() => {}); } }} />
       );
-      case "stickers": return <StickerSettings value={edit} onChange={setEdit} id={selectedSticker} time={time} onDone={() => setSelectedSticker(null)} />;
-      case "thumb": return <ThumbnailMaker value={thumb} jobId={job?.meta ? job.id : undefined} time={time} sub={look.sub} version={v} />;
+      case "stickers": return (
+        <AtPlayhead playhead={playhead}>{(time) => (
+          <StickerSettings value={edit} onChange={setEdit} id={selectedSticker} time={time} onDone={() => setSelectedSticker(null)} />
+        )}</AtPlayhead>
+      );
+      case "thumb": return (
+        <AtPlayhead playhead={playhead}>{(time) => (
+          <ThumbnailMaker value={thumb} jobId={job?.meta ? job.id : undefined} time={time} sub={look.sub} version={v} />
+        )}</AtPlayhead>
+      );
       case "voice": return (
         <div className="pane">
           <h4>About the voice</h4>
@@ -696,7 +866,11 @@ export default function Studio() {
       case "captions": case "text": return <SubtitleStylePanel {...lookProps} brand={brand} reload={reload} />;
       case "filters": return <AdjustPanel {...lookProps} />;
       case "effects": return <ExtrasPanel {...lookProps} />;
-      case "audio": return <SoundShaping value={mix} onChange={setMix} split={clone || mix.split} now={time} selectedPart={selectedPart} onSelectPart={setSelectedPart} />;
+      case "audio": return (
+        <AtPlayhead playhead={playhead}>{(time) => (
+          <SoundShaping value={mix} onChange={setMix} split={clone || mix.split} now={time} selectedPart={selectedPart} onSelectPart={setSelectedPart} />
+        )}</AtPlayhead>
+      );
       case "logo": return <LogoPanel {...lookProps} brand={brand} reload={reload} part="right" />;
       case "export": return (
         <div className="pane">
@@ -785,8 +959,7 @@ export default function Studio() {
         <Player src={src} finalSrc={finalSrc} view={view} onView={setView} look={look} onLook={setLook} segs={segs}
           logoUrl={brand?.logo?.url ?? null} videoRef={videoRef} onPlay={audio.start} onTime={onTime} onDuration={onDuration}
           jobId={job?.meta ? job.id : undefined} placeholder={placeholder}
-          edit={edit} onEdit={setEdit} selectedSticker={selectedSticker}
-          onSelectSticker={(id) => { setSelectedSticker(id); if (id) setTab("stickers"); }} />
+          edit={edit} onEdit={setEdit} selectedSticker={selectedSticker} onSelectSticker={pickStickerOnPicture} />
       </main>
 
       <aside className="panel right">
@@ -797,12 +970,12 @@ export default function Studio() {
       {handle("left")}{handle("right")}{handle("bottom")}
 
       <footer className="bottom">
-        <Timeline duration={duration || job?.meta?.duration || 0} time={time} onSeek={seek} segs={segs} edited={edited}
-          selected={selected} onSelect={(i) => { setSelected(i); if (i !== null && tab !== "voice") setTab("captions"); }}
-          parts={mix.parts} selectedPart={selectedPart} onSelectPart={(i) => { setSelectedPart(i); setTab("audio"); }}
+        <Timeline duration={duration || job?.meta?.duration || 0} playhead={playhead} onSeek={seek} segs={segs} edited={edited}
+          selected={selected} onSelect={pickLineInTimeline}
+          parts={mix.parts} selectedPart={selectedPart} onSelectPart={pickPart}
           trim={!job && src ? trim : null} onTrim={setTrim} speakers={speakers}
-          cuts={edit.cuts} selectedCut={selectedCut} onSelectCut={(i) => { setSelectedCut(i); setTab("edit"); }} marks={marks}
-          stickers={edit.stickers} selectedSticker={selectedSticker} onSelectSticker={(id) => { setSelectedSticker(id); setTab("stickers"); }} />
+          cuts={edit.cuts} selectedCut={selectedCut} onSelectCut={pickCut} marks={marks}
+          stickers={edit.stickers} selectedSticker={selectedSticker} onSelectSticker={pickSticker} />
       </footer>
     </div>
   );

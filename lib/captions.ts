@@ -81,15 +81,21 @@ async function embedded(file: string, jd: string): Promise<Found[]> {
   const streams: { index: number; codec_name?: string; tags?: { language?: string }; disposition?: { forced?: number } }[] =
     JSON.parse(out.toString("utf8")).streams ?? [];
   const found: Found[] = [];
-  for (const s of streams) {
-    if (!TEXT_CODECS.has(s.codec_name ?? "") || s.disposition?.forced) continue;
-    const srt = path.join(jd, `captions_${s.index}.srt`);
+  const text = streams.filter((s) => TEXT_CODECS.has(s.codec_name ?? "") && !s.disposition?.forced);
+  const srt = (s: { index: number }) => path.join(jd, `captions_${s.index}.srt`);
+  const extract = (list: typeof text) => run(tool("ffmpeg"), ["-y", "-v", "error", "-i", file,
+    ...list.flatMap((s) => ["-map", `0:${s.index}`, "-f", "srt", srt(s)])]);
+  // every track in one read of the file (a 4 GB film with 15 tracks was read 15 times); should one of them not
+  // convert, each on its own as before, so the others are still used
+  let together = false;
+  if (text.length > 1) together = await extract(text).then(() => true, (e) => { console.error(e); return false; });
+  for (const s of text) {
     try {
-      await run(tool("ffmpeg"), ["-y", "-v", "error", "-i", file, "-map", `0:${s.index}`, "-f", "srt", srt]);
-      const cues = parseSubs(await fsp.readFile(srt, "utf8"));
+      if (!together) await extract([s]);
+      const cues = parseSubs(await fsp.readFile(srt(s), "utf8"));
       const language = detect(cues);
       if (language) found.push({ cues, language, from: `the video's ${language === "zh" ? "Chinese" : "English"} subtitle track` });
-    } catch (e) { console.error(e); } finally { await fsp.rm(srt, { force: true }); }
+    } catch (e) { console.error(e); } finally { await fsp.rm(srt(s), { force: true }); }
   }
   return found;
 }

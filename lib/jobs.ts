@@ -34,7 +34,13 @@ function init(): Store {
   for (const id of fs.readdirSync(JOBS_DIR)) {
     const f = path.join(JOBS_DIR, id, "job.json");
     if (!fs.existsSync(f)) continue;
-    const job: Job = JSON.parse(fs.readFileSync(f, "utf8"));
+    let job: Job;
+    try {
+      job = JSON.parse(fs.readFileSync(f, "utf8"));
+    } catch (e) { // a damaged project must not stop the app: it is left out (its files stay)
+      console.error(`Skipping project ${id}: its job.json cannot be read`, e);
+      continue;
+    }
     job.task = undefined; // a background task does not survive a restart; it is started again when needed
     if (job.status === "queued" || job.status === "running") {
       Object.assign(job, { status: "error", error: "Server restarted while this job was running" });
@@ -48,8 +54,13 @@ const store = (g.__khmerDub ??= init());
 export const jobs = store.jobs;
 export const jobDir = (id: string) => path.join(JOBS_DIR, id);
 
+/** Written whole or not at all (a crash or power cut mid-write would otherwise leave a broken job.json). */
 export function save(job: Job) {
-  fs.writeFileSync(path.join(jobDir(job.id), "job.json"), JSON.stringify(job, null, 1), "utf8");
+  const dir = jobDir(job.id);
+  if (!fs.existsSync(dir)) return; // deleted meanwhile (e.g. while separating in the background)
+  const f = path.join(dir, "job.json");
+  fs.writeFileSync(f + ".tmp", JSON.stringify(job, null, 1), "utf8");
+  fs.renameSync(f + ".tmp", f);
 }
 
 /** Progress updates; also adds up how many seconds each stage took (job.timings). */

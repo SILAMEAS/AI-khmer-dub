@@ -328,7 +328,8 @@ export function Batch({ params, onDone }: { params: Record<string, string>; onDo
       try { last = (await api<Job>("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...p, url: u }) })).id; } catch { failed++; }
     }
     for (const f of files) {
-      try { last = (await uploadFile(f, p, (pct) => setState(`Uploading ${++n > total ? total : n}/${total}: ${f.name} ${pct}%`))).id; } catch { failed++; }
+      const k = ++n; // counted once per file, not on every progress report
+      try { last = (await uploadFile(f, p, (pct) => setState(`Uploading ${k}/${total}: ${f.name} ${pct}%`))).id; } catch { failed++; }
     }
     setBusy(false); setLinks(""); setFiles([]);
     setState(`${total - failed} added${failed ? `, ${failed} failed` : ""} – they run one after the other (see Projects).`);

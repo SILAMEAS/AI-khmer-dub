@@ -493,6 +493,25 @@ BATCH_SECONDS = 20  # with the 6 s voice sample this stays inside the model's 30
 BATCH_GAP = 0.3     # silence between lines in a batch
 
 
+def pieces(w: torch.Tensor, limit: int) -> list:
+    """
+    A line longer than one pass (1 x n samples) cut into pieces of at most `limit` samples, each cut at the quietest
+    moment of the second half of the piece (a pause between words), so the converted pieces join without a jump.
+    Cutting it short instead lost the end of every line over 20 s.
+    """
+    frame = VC_SR // 50
+    out = []
+    while w.size(-1) > limit:
+        # at least a second left over: a sliver of sound is not something the model can speak
+        part = w[0, limit // 2: min(limit, w.size(-1) - VC_SR)]
+        n = part.numel() // frame
+        energy = part[: n * frame].reshape(n, frame).pow(2).mean(dim=1)
+        cut = limit // 2 + int(energy.argmin()) * frame + frame // 2
+        out.append(w[:, :cut])
+        w = w[:, cut:]
+    return out + [w]
+
+
 def cmd_convert(req):
     """
     Lines of the same person are converted together, up to 20 s at a time. Each pass has a fixed cost
@@ -526,7 +545,14 @@ def cmd_convert(req):
     for ref, idx in by_ref.items():
         batch, length = [], 0
         for i in idx:
-            w = vc.load(items[i]["src"])[:, : VC_SR * BATCH_SECONDS]
+            w = vc.load(items[i]["src"])
+            if w.size(-1) > VC_SR * BATCH_SECONDS:  # too long for one pass: in pieces, on its own
+                y = np.concatenate([np.atleast_1d(vc.convert(p, ref, steps, ref_s))
+                                    for p in pieces(w, VC_SR * BATCH_SECONDS)])
+                sf.write(items[i]["out"], y, VC_SR, subtype="FLOAT")
+                done += 1
+                log(f"PROGRESS {done} {len(items)}")
+                continue
             if batch and length + w.size(-1) > VC_SR * BATCH_SECONDS:
                 run(ref, batch)
                 batch, length = [], 0

@@ -1,4 +1,5 @@
 /** Types and small helpers shared by the editor's parts. */
+import { useSyncExternalStore } from "react";
 import type { EditOpts } from "@/lib/edit";
 export { DEFAULT_EDIT, cutAt, mergeRanges, outputDuration, punchRanges, toOutput, zoomAt, SPEEDS } from "@/lib/edit";
 export type { EditOpts, Range, Sticker } from "@/lib/edit";
@@ -66,10 +67,16 @@ export function parseTime(v: string): number {
   return v.split(":").reduce((t, part) => t * 60 + parseFloat(part), 0);
 }
 
+/** A failed request; `status` is 0 when the server could not be reached at all. */
+export class ApiError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
+
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, init);
+  let r: Response;
+  try { r = await fetch(url, init); } catch { throw new ApiError("The app is not reachable - is it still running?", 0); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.detail || r.statusText);
+  if (!r.ok) throw new ApiError(j.detail || r.statusText, r.status);
   return j;
 }
 
@@ -80,12 +87,33 @@ export function uploadFile(file: File, params: Record<string, string>, onPct: (p
     x.open("POST", "/api/jobs?" + new URLSearchParams({ ...params, name: file.name }));
     x.upload.onprogress = (e) => e.lengthComputable && onPct(Math.round((e.loaded / e.total) * 100));
     x.onload = () => {
-      const j = JSON.parse(x.responseText || "{}");
-      x.status < 300 ? resolve(j) : reject(new Error(j.detail || x.statusText));
+      let j: { detail?: string } = {};
+      try { j = JSON.parse(x.responseText || "{}"); } catch { /* not JSON, e.g. an error page */ }
+      x.status < 300 && "id" in j ? resolve(j as Job) : reject(new Error(j.detail || x.statusText || "Upload failed"));
     };
     x.onerror = () => reject(new Error("Upload failed"));
+    x.onabort = () => reject(new Error("Upload was stopped"));
     x.send(file);
   });
+}
+
+/**
+ * The playhead's time, kept out of React state: it changes many times a second while playing, and a long video's
+ * editor (thousands of lines) must not be drawn again each time. Only the few parts that show it listen.
+ */
+export type Playhead = { get: () => number; set: (t: number) => void; subscribe: (fn: () => void) => () => void };
+export function makePlayhead(): Playhead {
+  let t = 0;
+  const fns = new Set<() => void>();
+  return {
+    get: () => t,
+    set: (v) => { if (v === t) return; t = v; fns.forEach((fn) => fn()); },
+    subscribe: (fn) => { fns.add(fn); return () => { fns.delete(fn); }; },
+  };
+}
+/** The playhead's time, for a part that shows it (drawn again when it moves). */
+export function usePlayhead(p: Playhead): number {
+  return useSyncExternalStore(p.subscribe, p.get, () => 0);
 }
 
 /** The line being said at `t` (index), or -1. */
